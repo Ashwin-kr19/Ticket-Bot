@@ -1,5 +1,4 @@
 modules/auth.py:
-
 import bcrypt
 import sqlite3
 from modules.databases import DB_PATH
@@ -34,7 +33,6 @@ def authenticate_user(username, password):
     return False
 
 modules/chat.py:
-
 class ChatHistory:
     def __init__(self, max_history=5):
         self.max_history = max_history
@@ -43,11 +41,22 @@ class ChatHistory:
         self.user_details = None
         self.problem_summary = None
         self.awaiting_satisfaction = False
+        # Pre-chat form fields
+        self.name = None
+        self.email = None
+        self.phone_number = None
+        self.issue_description = None  # Small Description of the Issue/Request
+        # Workflow fields
+        self.customer = None  # Customer Name (e.g., Wheeltek)
+        self.product = None   # Product Name (e.g., LOS)
+        self.state = "pre_chat"  # Tracks workflow state: pre_chat, identify_issue, customer_product, specific_issue, request_handling, complete
+        self.specific_data = {}  # Stores additional data (e.g., Application ID, Screenshot request)
 
     def add_message(self, role, content):
         self.messages.append({"role": role, "content": content})
         if role == "user":
             self._current_query = content
+            self._process_user_input(content)
         elif role == "assistant" and hasattr(self, '_current_query'):
             self.conversation_pairs.append((self._current_query, content))
             self._maintain_history_window()
@@ -55,6 +64,105 @@ class ChatHistory:
     def _maintain_history_window(self):
         if len(self.conversation_pairs) > self.max_history:
             self.conversation_pairs = self.conversation_pairs[-self.max_history:]
+
+    def _process_user_input(self, content):
+        content_lower = content.lower()
+        if self.state == "pre_chat":
+            if not self.name:
+                self.name = content.strip()
+            elif not self.email:
+                self.email = content.strip() if "@" in content else None
+            elif not self.phone_number:
+                self.phone_number = content.strip() if content.replace("+", "").replace("-", "").replace(" ", "").isdigit() else None
+            elif not self.issue_description:
+                self.issue_description = content.strip()
+                self.state = "identify_issue"
+        elif self.state == "identify_issue":
+            self.issue_description = content.strip()
+            self.state = "customer_product"
+        elif self.state == "customer_product":
+            if not self.customer:
+                valid_customers = ["wheeltek", "celestina", "new nemar", "mazda", "motorace", "first valley bank"]
+                self.customer = next((c for c in valid_customers if c in content_lower), content.strip())
+            elif not self.product:
+                valid_products = ["los", "aidc", "up", "denali", "imd", "alps", "autotech – msc"]
+                self.product = next((p for p in valid_products if p in content_lower), content.strip())
+                self.state = "specific_issue" if "issue" in self.issue_description.lower() else "request_handling"
+        elif self.state == "specific_issue":
+            self._handle_specific_issue(content)
+        elif self.state == "request_handling":
+            self._handle_request(content)
+
+    def _handle_specific_issue(self, content):
+        content_lower = content.lower()
+        if self.product == "los" and "application_id" not in self.specific_data:
+            self.specific_data["application_id"] = content.strip()
+            self.state = "complete"  # Move to complete state after collecting Application ID
+        elif "login issue" in self.issue_description.lower() and "screenshot" not in self.specific_data:
+            self.specific_data["screenshot"] = content.strip()
+            self.state = "complete"
+        elif "auto logout" in self.issue_description.lower():
+            if "screen_recording" not in self.specific_data:
+                self.specific_data["screen_recording"] = content.strip() if "yes" in content_lower else "No"
+            elif "module" not in self.specific_data:
+                self.specific_data["module"] = content.strip()
+                self.state = "complete"
+        elif "payment issue" in self.issue_description.lower() and "receipt_number" not in self.specific_data:
+            self.specific_data["receipt_number"] = content.strip()
+            self.state = "complete"
+        elif "tpin issue" in self.issue_description.lower() and "tpin_number" not in self.specific_data:
+            self.specific_data["tpin_number"] = content.strip()
+            self.state = "complete"
+        elif "allocation" in self.issue_description.lower():
+            if "screenshot" not in self.specific_data:
+                self.specific_data["screenshot"] = content.strip()
+            elif "collection_specialist" not in self.specific_data:
+                self.specific_data["collection_specialist"] = {"full_name": content.strip()}
+            elif "username" not in self.specific_data["collection_specialist"]:
+                self.specific_data["collection_specialist"]["username"] = content.strip()
+            elif "contact_number" not in self.specific_data["collection_specialist"]:
+                self.specific_data["collection_specialist"]["contact_number"] = content.strip()
+                self.state = "complete"
+        elif self.product == "denali" and "login issue" in self.issue_description.lower():
+            if "ebt_name" not in self.specific_data:
+                self.specific_data["ebt_name"] = content.strip()
+            elif "branch_role" not in self.specific_data:
+                self.specific_data["branch_role"] = content.strip()
+            elif "screenshot" not in self.specific_data:
+                self.specific_data["screenshot"] = content.strip()
+                self.state = "complete"
+
+    def _handle_request(self, content):
+        content_lower = content.lower()
+        if "new user" in self.issue_description.lower():
+            if "employee_id" not in self.specific_data:
+                self.specific_data["employee_id"] = content.strip()
+            elif "full_name" not in self.specific_data:
+                self.specific_data["full_name"] = content.strip()
+            elif "contact_number" not in self.specific_data:
+                self.specific_data["contact_number"] = content.strip()
+            elif "email_id" not in self.specific_data:
+                self.specific_data["email_id"] = content.strip()
+            elif "role" not in self.specific_data:
+                self.specific_data["role"] = content.strip()
+            elif "branch" not in self.specific_data:
+                self.specific_data["branch"] = content.strip()
+                self.state = "complete"
+        elif "contact number change" in self.issue_description.lower() and "new_number" not in self.specific_data:
+            self.specific_data["new_number"] = content.strip()
+            self.state = "complete"
+        elif "password reset" in self.issue_description.lower():
+            if "tried_forgot_password" not in self.specific_data:
+                self.specific_data["tried_forgot_password"] = content.strip()
+            elif "screenshot" not in self.specific_data and "no" in self.specific_data["tried_forgot_password"].lower():
+                self.specific_data["screenshot"] = content.strip()
+                self.state = "complete"
+        elif "module" in self.issue_description.lower():
+            if "branch" not in self.specific_data:
+                self.specific_data["branch"] = content.strip()
+            elif "role" not in self.specific_data:
+                self.specific_data["role"] = content.strip()
+                self.state = "complete"
 
     def get_messages(self):
         return self.messages
@@ -66,10 +174,7 @@ class ChatHistory:
         self.messages.clear()
         self.conversation_pairs.clear()
 
-
-
 modules/databases.py:
-
 
 import sqlite3
 import os
@@ -102,10 +207,7 @@ def create_tables():
     conn.commit()
     conn.close()
 
-
 modules/llm_service.py:
-
-
 import os
 import json
 from langchain_pinecone import PineconeVectorStore
@@ -145,9 +247,7 @@ def initialize_retrieval_chain():
     except Exception as e:
         raise ValueError(f"Error during AI assistant initialization: {str(e)}")
 
-
 modules/summaries.py:
-
 import datetime
 import sqlite3
 import streamlit as st
@@ -324,7 +424,6 @@ def create_zendesk_from_summary(chat_id, username, full_name, email, problem_sum
 
 
 modules/ticket_manager.py:
-
 import os
 import sqlite3
 import json
@@ -369,7 +468,7 @@ Generate a summary that includes:
 3. Key details provided by the user
 4. Current troubleshooting status
 5. Any solutions attempted
-Format the summary in a clear, technical style. Include all user details and focus on the relevant technical information."""
+Format the summary in a clear, technical style."""
     
     chat_text = "\n".join(relevant_messages)
     try:
@@ -420,12 +519,21 @@ def get_saved_summaries(username):
         print(f"Error retrieving summaries: {e}")
         return []
 
-def create_zendesk_ticket(problem_summary, user_name=None, user_email=None):
+def create_zendesk_ticket(problem_summary, user_name=None, user_email=None, chat_data=None):
     url = f"https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets.json"
+    chat_data = chat_data or {}
+    specific_data_str = "\n".join([f"{k}: {v}" for k, v in chat_data.get('specific_data', {}).items()])
     ticket = {
         "subject": f"Support Request: {user_name if user_name else 'New User'}",
-        "comment": {"body": problem_summary},
-        "priority": "normal"
+        "comment": {"body": f"{problem_summary}\n\nAdditional Details:\n{specific_data_str}"},
+        "priority": "normal",
+        "custom_fields": [
+            {"id": "25372912209938", "value": chat_data.get('issue_description', 'Other')},  # Issue Description
+            {"id": "25379100976786", "value": chat_data.get('product', 'Not provided')},     # Product
+            {"id": "25391550675474", "value": chat_data.get('customer', 'Not provided')},    # Customer
+            {"id": "25391564681106", "value": chat_data.get('name', 'Not provided')},        # Name
+            {"id": "25391578097426", "value": chat_data.get('phone_number', None)}           # Phone Number
+        ]
     }
     if user_email:
         ticket["requester"] = {"email": user_email, "name": user_name if user_name else "Requester"}
@@ -444,7 +552,6 @@ def create_zendesk_ticket(problem_summary, user_name=None, user_email=None):
         return False, f"Unexpected error: {str(e)}", None
 
 modules/utils.py:
-
 import json
 from deep_translator import GoogleTranslator
 
@@ -465,25 +572,18 @@ def translate_text(text, dest_lang):
 
 LANGUAGES = {
     "en": "English",
-    "es": "Spanish",
-    "fr": "French",
-    "de": "German",
     "hi": "Hindi",
     "id": "Indonesian",
     "ms": "Malay",
-    "tl": "Tagalog",
     "vi": "Vietnamese",
     "th": "Thai",
-    "my": "Burmese",
-    "km": "Khmer",
     "lo": "Lao",
-    "fil": "Filipino",
-    "tet": "Tetum",
+    "fil": "Filipino"
 }
 
 
-templates/chat.html:
 
+templates/chat.html:
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -564,7 +664,7 @@ templates/chat.html:
             {% else %}
                 <div class="bot-message">
                     <div class="bot-avatar"></div>
-                    <div class="message-content">Hello! I'm TicketBot, your dedicated support assistant. How can I assist you today?</div>
+                    <div class="message-content">Hello! I'm TicketBot, your dedicated support assistant. What’s your full name?</div>
                 </div>
             {% endif %}
         </div>
@@ -587,121 +687,80 @@ templates/chat.html:
         {% endif %}
     </div>
 
-    <!-- Add a hidden iframe for Zendesk widget interaction -->
-    <iframe id="zendesk-iframe" style="display:none; position:fixed; bottom:0; right:0; width:350px; height:500px; border:none; z-index:1000;"></iframe>
+    {% if session_data %}
+        <!-- Start of tvs8274 Zendesk Widget script -->
+        <script id="ze-snippet" src="https://static.zdassets.com/ekr/snippet.js?key=27a099ab-0e24-4079-acad-b7db1f15d0b0"> </script>
+        <!-- End of tvs8274 Zendesk Widget script -->
+        <script type="text/javascript">
+            // Log session data for debugging
+            console.log('Session data:', '{{ session_data | tojson | safe }}');
+
+            // Data to send to Zendesk
+            const ticketData = {
+                Application: '{{ session_data.get("Application", "") | tojson | safe }}',
+                Created_Date: '{{ session_data.get("Created_Date", "") | tojson | safe }}',
+                Customer: '{{ session_data.get("Customer", "") | tojson | safe }}',
+                Email_id: '{{ session_data.get("Email_id", "") | tojson | safe }}',
+                Incident_Description: '{{ session_data.get("Incident_Description", "") | tojson | safe }}',
+                Incident_Type: '{{ session_data.get("Incident_Type", "") | tojson | safe }}',
+                Name: '{{ session_data.get("Name", "") | tojson | safe }}',
+                Phone_Number: '{{ session_data.get("Phone_Number", "") | tojson | safe }}',
+                Product: '{{ session_data.get("Product", "") | tojson | safe }}',
+                Ticket_Category: '{{ session_data.get("Ticket_Category", "") | tojson | safe }}',
+                Ticket_Type:'{{ session_data.get("Ticket_Type", "") | tojson | safe }}'
+            };
+
+            // Set Zendesk custom fields on page load
+            window.addEventListener('load', function() {
+                console.log('Page loaded, setting Zendesk custom fields');
+                window.zE('messenger:set', 'conversationFields', [
+                    {"id": "25399778903058", "value": ticketData.Application},
+                    {"id": "25399775222290", "value": ticketData.Created_Date},
+                    {"id": "25391550675474", "value": ticketData.Customer},
+                    {"id": "25399741678354", "value": ticketData.Email_id},
+                    {"id": "25399781094930", "value": ticketData.Incident_Description},
+                    {"id": "25399750945554", "value": ticketData.Incident_Type},
+                    {"id": "25391564681106", "value": ticketData.Name},
+                    {"id": "25391578097426", "value": ticketData.Phone_Number},
+                    {"id": "25379100976786", "value": ticketData.Product},
+                    {"id": "25399783396370", "value": ticketData.Ticket_Category},
+                    {"id": "25399770228626", "value": ticketData.Ticket_Type}
+                ]);
+                window.zE('messenger:set', 'user', {
+                    email: ticketData.Email_id,
+                    name: ticketData.Name || 'Anonymous'
+                });
+            });
+
+            function handleNoSatisfaction() {
+                const messagesDiv = document.querySelector('.messages');
+                const statusMsg = document.createElement('div');
+                statusMsg.className = 'bot-message';
+                statusMsg.innerHTML = `
+                    <div class="bot-avatar"></div>
+                    <div class="message-content">
+                        Connecting you with a live support agent. Please wait...
+                    </div>
+                `;
+                messagesDiv.appendChild(statusMsg);
+                messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                window.zE('messenger', 'open');
+            }
+        </script>
+    {% endif %}
 
     <script>
         function toggleSidebar() {
             document.querySelector('.sidebar').classList.toggle('active');
         }
 
-        // Smooth scroll to latest message
         const messages = document.querySelector('.messages');
         messages.scrollTop = messages.scrollHeight;
-
-        // Define zE function if it doesn't exist
-        window.zE = window.zE || function() {
-            (zE.q = zE.q || []).push(arguments);
-        };
-
-        // Session storage key for tracking Zendesk widget state
-        const ZENDESK_WIDGET_SHOWN = 'zendeskWidgetShown';
-
-        window.onload = function() {
-            if (sessionStorage.getItem(ZENDESK_WIDGET_SHOWN) === 'true') {
-                const form = document.getElementById('no-satisfaction-form');
-                if (form) {
-                    sessionStorage.removeItem(ZENDESK_WIDGET_SHOWN);
-                    form.submit();
-                }
-            }
-        };
-
-        function handleNoSatisfaction() {
-            sessionStorage.setItem(ZENDESK_WIDGET_SHOWN, 'true');
-            const messagesDiv = document.querySelector('.messages');
-            const statusMsg = document.createElement('div');
-            statusMsg.className = 'bot-message';
-            statusMsg.innerHTML = `
-                <div class="bot-avatar"></div>
-                <div class="message-content">
-                    Connecting you with a live support agent. Please wait...
-                </div>
-            `;
-            messagesDiv.appendChild(statusMsg);
-            messagesDiv.scrollTop = messagesDiv.scrollHeight;
-            loadZendeskWidget();
-        }
-
-        function loadZendeskWidget() {
-            if (!document.getElementById('ze-snippet')) {
-                const script = document.createElement('script');
-                script.id = 'ze-snippet';
-                script.src = 'https://static.zdassets.com/ekr/snippet.js?key=27a099ab-0e24-4079-acad-b7db1f15d0b0';
-                script.async = true;
-                script.onload = function() {
-                    console.log('Zendesk widget script loaded successfully.');
-                    openZendeskWidget();
-                };
-                script.onerror = function() {
-                    console.error('Failed to load Zendesk widget script.');
-                    handleWidgetFailure();
-                };
-                document.body.appendChild(script);
-            } else {
-                openZendeskWidget();
-            }
-        }
-
-        function openZendeskWidget() {
-            if (typeof zE !== 'undefined') {
-                zE('webWidget', 'updateSettings', {
-                    webWidget: {
-                        chat: {
-                            title: 'Live Support',
-                            prechatForm: {
-                                greeting: {
-                                    '*': 'Please fill out the form below to chat with an agent.'
-                                }
-                            }
-                        }
-                    }
-                });
-                zE('webWidget', 'open');
-                setTimeout(function() {
-                    zE('webWidget:on', 'close', function() {
-                        const form = document.getElementById('no-satisfaction-form');
-                        if (form) form.submit();
-                    });
-                }, 1000);
-            } else {
-                handleWidgetFailure();
-            }
-        }
-
-        function handleWidgetFailure() {
-            const messagesDiv = document.querySelector('.messages');
-            const fallbackMsg = document.createElement('div');
-            fallbackMsg.className = 'bot-message';
-            fallbackMsg.innerHTML = `
-                <div class="bot-avatar"></div>
-                <div class="message-content">
-                    Sorry, we couldn't connect you to live chat at the moment. Creating a support ticket instead...
-                </div>
-            `;
-            messagesDiv.appendChild(fallbackMsg);
-            messagesDiv.scrollTop = messagesDiv.scrollHeight;
-            setTimeout(function() {
-                const form = document.getElementById('no-satisfaction-form');
-                if (form) form.submit();
-            }, 2000);
-        }
     </script>
 </body>
 </html>
 
 templates/login.html:
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -902,7 +961,6 @@ templates/login.html:
 </html>
 
 templates/register.html:
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1108,7 +1166,6 @@ templates/register.html:
 </html>
 
 templates/summaries.html:
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1220,14 +1277,150 @@ templates/summaries.html:
 </body>
 </html>
 
-
-
+templates/user_details.html:
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>User Details - TicketBot</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        .login-container {
+            max-width: 500px;
+            margin: 80px auto;
+            background-color: #fff;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+            display: flex;
+        }
+        .login-sidebar {
+            width: 8px;
+            background-color: #2e8b57;
+        }
+        .login-content {
+            flex: 1;
+            padding: 30px 40px;
+        }
+        .login-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 25px;
+        }
+        .login-icon {
+            margin-right: 10px;
+            color: #1a3e3e;
+        }
+        .login-title {
+            margin: 0;
+            color: #333;
+            font-size: 20px;
+            font-weight: 500;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        .form-label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 500;
+            color: #555;
+        }
+        .form-input, textarea {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+        .form-input:focus, textarea:focus {
+            border-color: #2e8b57;
+            outline: none;
+        }
+        .login-btn {
+            width: 100%;
+            padding: 12px;
+            background-color: #2e8b57;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 500;
+            cursor: pointer;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            transition: background-color 0.3s;
+        }
+        .login-btn:hover {
+            background-color: #3cb371;
+        }
+        .top-header {
+            background-color: #1a3e3e;
+            color: white;
+            padding: 15px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .top-header h1 {
+            margin: 0;
+            font-size: 20px;
+            font-weight: 500;
+        }
+    </style>
+</head>
+<body>
+    <div class="top-header">
+        <h1>TicketBot</h1>
+    </div>
+    
+    <div class="login-container">
+        <div class="login-sidebar"></div>
+        <div class="login-content">
+            <div class="login-header">
+                <i class="fas fa-user login-icon"></i>
+                <h2 class="login-title">Enter Your Details</h2>
+            </div>
+            
+            <form method="POST" action="{{ url_for('user_details') }}">
+                <div class="form-group">
+                    <label for="full_name" class="form-label">Full Name:</label>
+                    <input type="text" id="full_name" name="full_name" class="form-input" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="email" class="form-label">Email Address:</label>
+                    <input type="email" id="email" name="email" class="form-input" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="contact_number" class="form-label">Contact Number:</label>
+                    <input type="tel" id="contact_number" name="contact_number" class="form-input" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="issue_description" class="form-label">Issue/Request Description:</label>
+                    <textarea id="issue_description" name="issue_description" rows="4" required></textarea>
+                </div>
+                
+                <button type="submit" class="login-btn">
+                    <i class="fas fa-arrow-right" style="margin-right: 8px;"></i>Proceed to Chat
+                </button>
+            </form>
+        </div>
+    </div>
+</body>
+</html>
 
 appli.py:
-
 from flask import Flask, render_template, request, redirect, url_for, session, jsonify
 import uuid
 import datetime
+import logging
 from modules.auth import register_user, authenticate_user
 from modules.databases import create_tables
 from modules.chat import ChatHistory
@@ -1235,24 +1428,25 @@ from modules.llm_service import initialize_retrieval_chain, ChatGoogleGenerative
 from modules.ticket_manager import generate_problem_summary, save_ticket_details, get_saved_summaries, create_zendesk_ticket
 from modules.utils import load_api_keys, translate_text, LANGUAGES
 
-app = Flask(__name__)
-app.secret_key = "your-secret-key-here"  # Replace with a secure key
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
-# Fallback classes for LLM and chain
+app = Flask(__name__)
+app.secret_key = "your-secret-key-here"
+
+if 'chats' not in app.config:
+    app.config['chats'] = {}
+
 class FallbackLLM:
     def invoke(self, prompt):
         class Response:
             def __init__(self, content):
                 self.content = content
-        return Response("I'm currently experiencing connection issues. Please try again later or contact support if this persists.")
+        return Response("I'm currently experiencing connection issues. Please try again later or contact support.")
 
 class FallbackChain:
     def __call__(self, inputs):
-        return {"answer": "I'm unable to access the knowledge base at the moment. Please try basic troubleshooting steps or contact technical support."}
-
-# Global storage for chats
-if 'chats' not in app.config:
-    app.config['chats'] = {}
+        return {"answer": "I'm unable to access the knowledge base right now. Please try basic troubleshooting or contact support."}
 
 def initialize_system():
     if 'current_chat' not in session:
@@ -1264,51 +1458,45 @@ def initialize_system():
     if 'current_problem_summary' not in session:
         session['current_problem_summary'] = {}
     if 'current_timestamp' not in session:
-        session['current_timestamp'] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:S")
+        session['current_timestamp'] = datetime.datetime.now().strftime("%Y-%m-%d")
     if 'api_keys' not in app.config:
         app.config['api_keys'] = load_api_keys()
     if 'user_details' not in session:
         session['user_details'] = None
 
 def evaluate_and_respond(query, retriever_answer, llm, chat_history):
-    # Handle satisfaction response
     if chat_history.awaiting_satisfaction and query.lower() in ['yes', 'no']:
         chat_history.awaiting_satisfaction = False
         if query.lower() == 'yes':
-            return "I'm glad I could help! If you have any more questions, feel free to start a new chat. Goodbye! 😊"
+            return "I'm glad I could help! If you have more questions, start a new chat. Goodbye! 😊"
         elif query.lower() == 'no':
-            return "I'm sorry I couldn't fully resolve your issue. I'm opening a live chat with an agent to assist you further."
-        return "Please respond with 'yes' if satisfied or 'no' if you'd like to connect with a live agent."
-
-    # Process normal query even if awaiting satisfaction
+            return "I'm sorry I couldn’t resolve your issue. Connecting you to a live agent..."
+        return "Please respond with 'yes' if satisfied or 'no' for a live agent."
+    
     system_prompt = """You are a helpful customer support AI assistant. Your responses should be:
     1. Direct and professional
     2. Focused on solving the user's issue
-    3. Free of any meta-commentary or evaluation prefixes
+    3. Free of meta-commentary
     4. Clear and actionable"""
     user_prompt = f"""User query: {query}
     Context from knowledge base: {retriever_answer}
-    Provide a direct response to help the user. Do not include any evaluation statements or prefixes."""
+    Provide a direct response to help the user."""
     full_prompt = f"{system_prompt}\n\n{user_prompt}"
     
     try:
         response = llm.invoke(full_prompt)
         final_response = response.content.replace("Response:", "").replace("Answer:", "").strip()
-        if final_response.startswith("The knowledge base"):
-            final_response = " ".join(final_response.split()[5:])
         if not final_response.startswith("I'm having trouble") and not final_response.startswith("Error"):
             chat_history.awaiting_satisfaction = True
             return f"{final_response}\n\nAre you satisfied with this resolution? Please respond with 'yes' or 'no'."
         return final_response
     except Exception as e:
-        return f"I'm having trouble processing your request. Could you please try rephrasing or provide more details? Error: {str(e)}"
+        return f"I'm having trouble processing your request. Please rephrase or provide more details. Error: {str(e)}"
 
 @app.route('/')
 def index():
     if 'username' not in session:
         return redirect(url_for('login'))
-    if not session.get('user_details'):
-        return redirect(url_for('user_details'))
     return redirect(url_for('chat'))
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -1319,7 +1507,7 @@ def login():
         if authenticate_user(username, password):
             session['username'] = username
             initialize_system()
-            return redirect(url_for('user_details'))
+            return redirect(url_for('chat'))
         return render_template('login.html', error="Invalid username or password")
     return render_template('login.html')
 
@@ -1339,33 +1527,10 @@ def logout():
     app.config['chats'] = {}
     return redirect(url_for('login'))
 
-@app.route('/user_details', methods=['GET', 'POST'])
-def user_details():
-    if 'username' not in session:
-        return redirect(url_for('login'))
-    
-    if request.method == 'POST':
-        full_name = request.form['full_name']
-        email = request.form['email']
-        contact_number = request.form['contact_number']
-        issue_description = request.form['issue_description']
-        
-        session['user_details'] = {
-            'full_name': full_name,
-            'email': email,
-            'contact_number': contact_number,
-            'issue_description': issue_description
-        }
-        return redirect(url_for('chat'))
-    
-    return render_template('user_details.html')
-
 @app.route('/chat', methods=['GET', 'POST'])
 def chat():
     if 'username' not in session:
         return redirect(url_for('login'))
-    if not session.get('user_details'):
-        return redirect(url_for('user_details'))
     
     initialize_system()
     chats = app.config['chats']
@@ -1383,7 +1548,7 @@ def chat():
             )
             app.config['qa_chain'] = initialize_retrieval_chain()
         except Exception as e:
-            print(f"Error initializing AI assistant: {str(e)}")
+            logger.error(f"Error initializing AI assistant: {str(e)}")
             app.config['llm'] = FallbackLLM()
             app.config['qa_chain'] = FallbackChain()
 
@@ -1392,7 +1557,6 @@ def chat():
         if action == 'new_chat':
             chat_id = str(uuid.uuid4())
             chats[chat_id] = ChatHistory(max_history=5)
-            chats[chat_id].user_details = session['user_details']
             session['current_chat'] = chat_id
             return redirect(url_for('chat', lang=lang_code))
         
@@ -1409,19 +1573,47 @@ def chat():
                 translated_query = translate_text(query, "en")
                 current_chat_obj.add_message("user", query)
                 
-                try:
-                    retriever_answer = app.config['qa_chain']({"question": translated_query, "chat_history": current_chat_obj.get_conversation_pairs()})["answer"]
-                except Exception as e:
-                    retriever_answer = f"Error retrieving answer: {str(e)}"
-                response = evaluate_and_respond(translated_query, retriever_answer, app.config['llm'], current_chat_obj)
+                if current_chat_obj.state == "pre_chat":
+                    if not current_chat_obj.name:
+                        response = "What’s your full name?"
+                    elif not current_chat_obj.email:
+                        response = "What’s your email address?"
+                    elif not current_chat_obj.phone_number:
+                        response = "What’s your contact number?"
+                    elif not current_chat_obj.issue_description:
+                        response = "Please provide a small description of your issue or request."
+                    translated_response = translate_text(response, lang_code)
+                    current_chat_obj.add_message("assistant", translated_response)
                 
-                translated_response = translate_text(response, lang_code)
-                current_chat_obj.add_message("assistant", translated_response)
-                if "Goodbye" in response:
-                    chat_id = str(uuid.uuid4())
-                    chats[chat_id] = ChatHistory(max_history=5)
-                    chats[chat_id].user_details = session['user_details']
-                    session['current_chat'] = chat_id
+                elif current_chat_obj.state == "identify_issue":
+                    response = "What is the issue you are facing?"
+                    translated_response = translate_text(response, lang_code)
+                    current_chat_obj.add_message("assistant", translated_response)
+                
+                elif current_chat_obj.state == "customer_product":
+                    if not current_chat_obj.customer:
+                        response = "Which customer are you with? (Wheeltek, Celestina, New Nemar, Mazda, Motorace, First Valley Bank)"
+                    elif not current_chat_obj.product:
+                        response = "Which product is this about? (LOS, AIDC, UP, DENALI, IMD, ALPS, Autotech – MSC)"
+                    translated_response = translate_text(response, lang_code)
+                    current_chat_obj.add_message("assistant", translated_response)
+                
+                elif current_chat_obj.state == "specific_issue":
+                    response = _get_specific_issue_prompt(current_chat_obj)
+                    translated_response = translate_text(response, lang_code)
+                    current_chat_obj.add_message("assistant", translated_response)
+                
+                elif current_chat_obj.state == "request_handling":
+                    response = _get_request_prompt(current_chat_obj)
+                    translated_response = translate_text(response, lang_code)
+                    current_chat_obj.add_message("assistant", translated_response)
+                
+                elif current_chat_obj.state == "complete":
+                    retriever_answer = app.config['qa_chain']({"question": translated_query, "chat_history": current_chat_obj.get_conversation_pairs()})["answer"]
+                    response = evaluate_and_respond(translated_query, retriever_answer, app.config['llm'], current_chat_obj)
+                    translated_response = translate_text(response, lang_code)
+                    current_chat_obj.add_message("assistant", translated_response)
+                
                 return redirect(url_for('chat', lang=lang_code))
         
         elif action == 'satisfaction_response':
@@ -1434,7 +1626,6 @@ def chat():
                 if "Goodbye" in translated_response:
                     chat_id = str(uuid.uuid4())
                     chats[chat_id] = ChatHistory(max_history=5)
-                    chats[chat_id].user_details = session['user_details']
                     session['current_chat'] = chat_id
             return redirect(url_for('chat', lang=lang_code))
         
@@ -1446,8 +1637,8 @@ def chat():
                     success = save_ticket_details(
                         current_chat,
                         session['username'],
-                        current_chat_obj.user_details.get('full_name', 'Unknown'),
-                        current_chat_obj.user_details.get('email', 'unknown@example.com'),
+                        current_chat_obj.name or 'Unknown',
+                        current_chat_obj.email or 'unknown@example.com',
                         problem_summary
                     )
                     if success:
@@ -1457,9 +1648,24 @@ def chat():
         elif action == 'create_zendesk' and current_chat in session['current_problem_summary'] and current_chat in chats:
             current_chat_obj = chats[current_chat]
             problem_summary = session['current_problem_summary'][current_chat]
-            user_name = current_chat_obj.user_details.get('full_name', 'Anonymous User')
-            user_email = current_chat_obj.user_details.get('email', 'anonymous@example.com')
-            success, message, ticket_url = create_zendesk_ticket(problem_summary, user_name, user_email)
+            user_name = current_chat_obj.name or 'Anonymous User'
+            user_email = current_chat_obj.email or 'anonymous@example.com'
+            chat_data = {
+                'Email_id': current_chat_obj.email or '',
+                'Product': current_chat_obj.product or '',
+                'Customer': current_chat_obj.customer or '',
+                'Created_Date': datetime.datetime.now().strftime("%Y-%m-%d"),
+                'Incident_Type': 'Incident' if 'issue' in (current_chat_obj.issue_description or '').lower() else 'Request',
+                'Ticket_Category': 'Technical',
+                'Ticket_Type': 'Support',
+                'Application': current_chat_obj.specific_data.get('application_id', '') or '',
+                'Incident_Description': current_chat_obj.issue_description or '',
+                'Name': current_chat_obj.name or '',
+                'Phone_Number': current_chat_obj.phone_number or ''
+            }
+            logger.debug(f"Chat data for Zendesk: {chat_data}")
+            success, message, ticket_url = create_zendesk_ticket(problem_summary, user_name, user_email, chat_data)
+            logger.info(f"Zendesk ticket creation: Success={success}, Message={message}, URL={ticket_url}")
             return redirect(url_for('chat', lang=lang_code))
         
         elif action == 'delete_chat':
@@ -1473,7 +1679,6 @@ def chat():
                 return redirect(url_for('chat', lang=lang_code))
 
     if current_chat and current_chat not in chats:
-        current_chat = None
         session['current_chat'] = None
     if not current_chat:
         if chats:
@@ -1481,15 +1686,28 @@ def chat():
         else:
             chat_id = str(uuid.uuid4())
             chats[chat_id] = ChatHistory(max_history=5)
-            chats[chat_id].user_details = session['user_details']
             session['current_chat'] = chat_id
     current_chat = session['current_chat']
 
     current_chat_obj = chats.get(current_chat)
+    session_data = {
+        'Email_id': current_chat_obj.email or '',
+        'Product': current_chat_obj.product or '',
+        'Customer': current_chat_obj.customer or '',
+        'Created_Date': session.get('current_timestamp', ''),
+        'Incident_Type': 'Incident' if 'issue' in (current_chat_obj.issue_description or '').lower() else 'Request',
+        'Ticket_Category': 'Technical',
+        'Ticket_Type': 'Support',
+        'Application': current_chat_obj.specific_data.get('application_id', '') or '',
+        'Incident_Description': current_chat_obj.issue_description or '',
+        'Name': current_chat_obj.name or '',
+        'Phone_Number': current_chat_obj.phone_number or ''
+    } if current_chat_obj else {}
+    
     return render_template('chat.html', username=session['username'], chats=chats, current_chat=current_chat, 
                            chat_history=current_chat_obj.get_messages() if current_chat_obj else [], 
                            problem_summary=session['current_problem_summary'].get(current_chat, None),
-                           lang_code=lang_code, languages=LANGUAGES)
+                           lang_code=lang_code, languages=LANGUAGES, session_data=session_data)
 
 @app.route('/summaries')
 def summaries():
@@ -1511,6 +1729,628 @@ def create_zendesk_from_summary(chat_id):
             return redirect(url_for('summaries'))
     return redirect(url_for('summaries'))
 
+@app.route('/get_chat_data')
+def get_chat_data():
+    chat_id = request.args.get('chat_id')
+    if chat_id in app.config['chats']:
+        chat_obj = app.config['chats'][chat_id]
+        return jsonify({
+            'name': chat_obj.name,
+            'email': chat_obj.email,
+            'phone_number': chat_obj.phone_number,
+            'issue_description': chat_obj.issue_description,
+            'customer': chat_obj.customer,
+            'product': chat_obj.product,
+            'specific_data': chat_obj.specific_data
+        })
+    return jsonify({}), 404
+
+def _get_specific_issue_prompt(chat_obj):
+    issue_lower = chat_obj.issue_description.lower()
+    if chat_obj.product == "los" and "application_id" not in chat_obj.specific_data:
+        return "Please provide the Application ID."
+    elif "login issue" in issue_lower and "screenshot" not in chat_obj.specific_data:
+        return "Please provide a screenshot of the login issue."
+    elif "auto logout" in issue_lower:
+        if "screen_recording" not in chat_obj.specific_data:
+            return "Can you provide a screen recording? (Yes/No)"
+        elif "module" not in chat_obj.specific_data:
+            return "Which module were you accessing?"
+    elif "payment issue" in issue_lower and "receipt_number" not in chat_obj.specific_data:
+        return "Please provide the Receipt Number or OR Number."
+    elif "tpin issue" in issue_lower and "tpin_number" not in chat_obj.specific_data:
+        return "Please provide the TPIN Number."
+    elif "allocation" in issue_lower:
+        if "screenshot" not in chat_obj.specific_data:
+            return "Please provide a screenshot."
+        elif "collection_specialist" not in chat_obj.specific_data:
+            return "Please provide the Collection Specialist’s Full Name."
+        elif "username" not in chat_obj.specific_data["collection_specialist"]:
+            return "Please provide the Collection Specialist’s Username."
+        elif "contact_number" not in chat_obj.specific_data["collection_specialist"]:
+            return "Please provide the Collection Specialist’s Contact Number."
+    elif chat_obj.product == "denali" and "login issue" in issue_lower:
+        if "ebt_name" not in chat_obj.specific_data:
+            return "Please provide the EBT Name."
+        elif "branch_role" not in chat_obj.specific_data:
+            return "Please provide the Branch Role."
+        elif "screenshot" not in chat_obj.specific_data:
+            return "Please provide a screenshot."
+    return "I’ve collected all the details. How else can I assist you?"
+
+def _get_request_prompt(chat_obj):
+    request_lower = chat_obj.issue_description.lower()
+    if "new user" in request_lower:
+        if "employee_id" not in chat_obj.specific_data:
+            return "Please provide the Employee ID or EBT Name."
+        elif "full_name" not in chat_obj.specific_data:
+            return "Please provide the Full Name."
+        elif "contact_number" not in chat_obj.specific_data:
+            return "Please provide the Contact Number."
+        elif "email_id" not in chat_obj.specific_data:
+            return "Please provide the Email ID."
+        elif "role" not in chat_obj.specific_data:
+            return "Please provide the Role."
+        elif "branch" not in chat_obj.specific_data:
+            return "Please provide the Branch."
+    elif "contact number change" in request_lower and "new_number" not in chat_obj.specific_data:
+        return "Please share the new number you want to update."
+    elif "password reset" in request_lower:
+        if "tried_forgot_password" not in chat_obj.specific_data:
+            return "Have you tried the Forgot Password option on the login page? (Yes/No)"
+        elif "screenshot" not in chat_obj.specific_data and "no" in chat_obj.specific_data["tried_forgot_password"].lower():
+            return "Please provide a screenshot of the error."
+    elif "module" in request_lower:
+        if "branch" not in chat_obj.specific_data:
+            return "Please provide the Branch."
+        elif "role" not in chat_obj.specific_data:
+            return "Please provide the Role."
+    return "I’ve collected all the details. How else can I assist you?"
+
 if __name__ == "__main__":
     create_tables()
     app.run(debug=True, host='0.0.0.0', port=5001)
+
+
+static/style.css:
+/* Reset and Base Styles */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Segoe UI', 'Roboto', 'Arial', sans-serif;
+    background-color: #f7f9fc;
+    color: #2c3e50;
+    line-height: 1.6;
+    height: 100vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+/* Header */
+.header {
+    background-color: #2c3e50;
+    color: #ffffff;
+    padding: 15px 30px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    position: sticky;
+    top: 0;
+    z-index: 1000;
+    transition: background-color 0.3s ease;
+}
+
+.header:hover {
+    background-color: #34495e;
+}
+
+.header h1 {
+    margin: 0;
+    font-size: 24px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+
+.header a {
+    color: #ecf0f1;
+    text-decoration: none;
+    font-weight: 500;
+    transition: color 0.3s ease;
+}
+
+.header a:hover {
+    color: #bdc3c7;
+}
+
+/* Menu Toggle */
+.menu-toggle {
+    display: none;
+    font-size: 24px;
+    cursor: pointer;
+    color: #ecf0f1;
+    z-index: 1001;
+    transition: color 0.3s ease;
+}
+
+.menu-toggle:hover {
+    color: #bdc3c7;
+}
+
+/* Sidebar */
+.sidebar {
+    width: 280px;
+    background-color: #ffffff;
+    position: fixed;
+    top: 70px;
+    bottom: 0;
+    padding: 25px 20px;
+    border-right: 1px solid #ecf0f1;
+    box-shadow: 2px 0 10px rgba(0, 0, 0, 0.05);
+    transition: transform 0.3s ease;
+    overflow-y: auto;
+}
+
+.sidebar h3 {
+    margin-top: 0;
+    font-size: 18px;
+    color: #2c3e50;
+    margin-bottom: 15px;
+    font-weight: 600;
+    border-bottom: 1px solid #ecf0f1;
+    padding-bottom: 10px;
+}
+
+.sidebar ul {
+    list-style: none;
+    padding: 0;
+    margin: 0 0 20px 0;
+}
+
+.sidebar ul li {
+    margin: 10px 0;
+}
+
+.sidebar button,
+.sidebar select {
+    width: 100%;
+    padding: 12px;
+    border: 1px solid #dfe6e9;
+    border-radius: 8px;
+    background-color: #ffffff;
+    color: #2c3e50;
+    cursor: pointer;
+    font-size: 14px;
+    transition: all 0.3s ease;
+    text-align: left;
+    font-weight: 500;
+}
+
+.sidebar button:hover,
+.sidebar select:hover {
+    background-color: #ecf0f1;
+    border-color: #bdc3c7;
+}
+
+/* Distinctive Styles for New Chat and View Summaries Buttons */
+.new-chat-btn,
+.view-summaries-btn {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 12px 15px;
+    margin-bottom: 15px;
+    border: none;
+    border-radius: 8px;
+    background-color: #27ae60;
+    color: #ffffff;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+    transition: all 0.3s ease;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+}
+
+.new-chat-btn:hover,
+.view-summaries-btn:hover {
+    background-color: #2ecc71;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.15);
+}
+
+.new-chat-btn::before,
+.view-summaries-btn::before {
+    font-size: 16px;
+}
+
+.new-chat-btn::before {
+    content: "➕";
+}
+
+.view-summaries-btn::before {
+    content: "📋";
+}
+
+/* Delete Chat Button */
+.delete-chat-btn {
+    padding: 8px 12px;
+    border: none;
+    border-radius: 50%;
+    background-color: #e74c3c;
+    color: #ffffff;
+    cursor: pointer;
+    font-size: 14px;
+    transition: all 0.3s ease;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+}
+
+.delete-chat-btn:hover {
+    background-color: #c0392b;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.15);
+}
+
+.sidebar a {
+    display: block;
+    padding: 12px;
+    text-decoration: none;
+    color: #2c3e50;
+    font-weight: 500;
+    border-radius: 8px;
+    transition: background-color 0.3s ease;
+}
+
+.sidebar a:hover {
+    background-color: #ecf0f1;
+}
+
+/* Chat Container */
+.chat-container {
+    margin-left: 300px;
+    padding: 30px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background-color: #ffffff;
+    border-radius: 15px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+    height: calc(100vh - 70px);
+    overflow: hidden;
+}
+
+.messages {
+    flex-grow: 1;
+    overflow-y: auto;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+    scrollbar-width: thin;
+    scrollbar-color: #27ae60 #ecf0f1;
+}
+
+.messages::-webkit-scrollbar {
+    width: 8px;
+}
+
+.messages::-webkit-scrollbar-track {
+    background: #ecf0f1;
+    border-radius: 10px;
+}
+
+.messages::-webkit-scrollbar-thumb {
+    background: #27ae60;
+    border-radius: 10px;
+}
+
+.messages::-webkit-scrollbar-thumb:hover {
+    background: #2ecc71;
+}
+
+.bot-message,
+.user-message {
+    display: flex;
+    align-items: flex-start;
+    max-width: 70%;
+    border-radius: 12px;
+    padding: 15px 20px;
+    position: relative;
+    animation: fadeIn 0.3s ease-in-out;
+}
+
+.bot-message {
+    margin-right: auto;
+    background-color: #e8f4f1;
+    border-left: 4px solid #27ae60;
+}
+
+.user-message {
+    margin-left: auto;
+    background-color: #27ae60;
+    color: #ffffff;
+    text-align: right;
+    border-left: 4px solid #ffffff;
+}
+
+.bot-avatar,
+.user-avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    margin-right: 12px;
+    background-color: #27ae60;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    color: #ffffff;
+    font-weight: 600;
+}
+
+.user-avatar {
+    background-color: #ffffff;
+    border: 2px solid #27ae60;
+    color: #27ae60;
+    margin-left: 12px;
+}
+
+.bot-avatar::before {
+    content: "🤖";
+}
+
+.message-content {
+    flex: 1;
+    word-wrap: break-word;
+}
+
+.message-form {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    padding: 15px;
+    background-color: #ffffff;
+    border-radius: 25px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+    position: sticky;
+    bottom: 20px;
+    margin: 20px;
+}
+
+.message-form input[type="text"] {
+    flex: 1;
+    padding: 12px 20px;
+    border: 1px solid #dfe6e9;
+    border-radius: 25px;
+    font-size: 14px;
+    outline: none;
+    transition: border-color 0.3s ease;
+}
+
+.message-form input[type="text"]:focus {
+    border-color: #27ae60;
+}
+
+.message-form button {
+    padding: 12px;
+    border: none;
+    border-radius: 50%;
+    background-color: #27ae60;
+    color: #ffffff;
+    cursor: pointer;
+    font-size: 16px;
+    width: 45px;
+    height: 45px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background-color 0.3s ease;
+}
+
+.message-form button:hover {
+    background-color: #2ecc71;
+}
+
+.message-form button::before {
+    content: "➤";
+}
+
+.satisfaction-buttons {
+    margin-top: 15px;
+    display: flex;
+    gap: 15px;
+    justify-content: flex-end;
+}
+
+.satisfaction-btn {
+    padding: 10px 20px;
+    border: none;
+    border-radius: 20px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    transition: all 0.3s ease;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+}
+
+.yes-btn {
+    background-color: #27ae60;
+    color: #ffffff;
+}
+
+.yes-btn:hover {
+    background-color: #2ecc71;
+    transform: translateY(-2px);
+}
+
+.no-btn {
+    background-color: #e74c3c;
+    color: #ffffff;
+}
+
+.no-btn:hover {
+    background-color: #c0392b;
+    transform: translateY(-2px);
+}
+
+.action-buttons {
+    margin-top: 20px;
+    display: flex;
+    gap: 15px;
+    padding: 0 20px 20px 20px;
+    justify-content: flex-end;
+}
+
+.action-buttons button {
+    padding: 12px 25px;
+    border: none;
+    border-radius: 20px;
+    background-color: #34495e;
+    color: #ffffff;
+    cursor: pointer;
+    font-weight: 500;
+    transition: all 0.3s ease;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+}
+
+.action-buttons button:hover {
+    background-color: #2c3e50;
+    transform: translateY(-2px);
+}
+
+.summary {
+    margin-top: 20px;
+    padding: 15px 20px;
+    background-color: #ecf0f1;
+    border-radius: 10px;
+    border-left: 5px solid #27ae60;
+    font-size: 14px;
+    color: #2c3e50;
+    line-height: 1.8;
+}
+
+.summary-card {
+    margin-bottom: 20px;
+    padding: 15px 20px;
+    background-color: #ffffff;
+    border-radius: 10px;
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.05);
+    border-left: 5px solid #27ae60;
+    animation: fadeIn 0.3s ease-in-out;
+}
+
+.summary-card h3 {
+    margin: 0 0 10px 0;
+    color: #2c3e50;
+    font-size: 18px;
+    font-weight: 600;
+}
+
+.summary-card p {
+    margin: 5px 0;
+    color: #7f8c8d;
+}
+
+.container {
+    max-width: 900px;
+    margin: 30px auto;
+    padding: 25px;
+    background-color: #ffffff;
+    border-radius: 15px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+}
+
+.error {
+    color: #e74c3c;
+    background-color: #fdecea;
+    padding: 12px 15px;
+    border-radius: 8px;
+    margin: 15px 0;
+    font-weight: 500;
+}
+
+/* Animations */
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+    .menu-toggle {
+        display: block;
+        position: fixed;
+        top: 15px;
+        left: 15px;
+    }
+
+    .sidebar {
+        width: 220px;
+        transform: translateX(-100%);
+        top: 60px;
+    }
+
+    .sidebar.active {
+        transform: translateX(0);
+    }
+
+    .chat-container {
+        margin-left: 0;
+        margin: 10px;
+        padding: 15px;
+        height: calc(100vh - 60px);
+        padding-bottom: 120px;
+    }
+
+    .messages {
+        padding: 10px;
+        gap: 10px;
+    }
+
+    .bot-message,
+    .user-message {
+        max-width: 85%;
+    }
+
+    .message-form {
+        margin: 10px;
+        padding: 10px;
+        bottom: 10px;
+    }
+
+    .satisfaction-buttons {
+        flex-direction: column;
+        gap: 10px;
+    }
+
+    .satisfaction-btn {
+        width: 100%;
+        text-align: center;
+    }
+
+    .action-buttons {
+        flex-direction: column;
+        align-items: flex-end;
+    }
+
+    .action-buttons button {
+        width: 100%;
+    }
+
+    .sidebar ul li {
+        flex-direction: column;
+        gap: 5px;
+    }
+
+    .delete-chat-btn {
+        width: 100%;
+        border-radius: 8px;
+    }
+}
+
+
