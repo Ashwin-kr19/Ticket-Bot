@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Pre-Chat Form</title>
+</head>
+<body>
+    <h1>Welcome to Support Chat</h1>
+    <p>Please fill out the form below to start a chat.</p>
+    {% if error %}
+        <p style="color: red;">{{ error }}</p>
+    {% endif %}
+    <form method="POST" action="{{ url_for('prechat') }}">
+        <label for="full_name">Full Name:</label><br>
+        <input type="text" id="full_name" name="full_name" required><br><br>
+
+        <label for="email">Email:</label><br>
+        <input type="email" id="email" name="email" required><br><br>
+
+        <label for="contact_number">Contact Number:</label><br>
+        <input type="text" id="contact_number" name="contact_number" required><br><br>
+
+        <label for="description">Description of Issue/Request:</label><br>
+        <textarea id="description" name="description" required></textarea><br><br>
+
+        <button type="submit">Start Chat</button>
+    </form>
+    <p><a href="{{ url_for('logout') }}">Logout</a></p>
+</body>
+</html>

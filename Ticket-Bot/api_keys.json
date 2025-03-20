@@ -1,0 +1,11 @@
+{
+    "COHERE_API_KEY": "0MnJAhdx5Cv2qB5JS2L7CpNletarIczDCfvlwpx5",
+    "PINECONE_API_KEY": "pcsk_5NU3Nm_QkGHfcKc4NfLuCTKoHUXGXajLMRWm9owyxR9BF29KBexifYvwS7VRqXrELNztMc",
+    "GOOGLE_API_KEY": "AIzaSyDy0rii48FvraJRmpBpF9NnAWmInJaxzVA",
+    "GROQ_API_KEY": "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",
+    "ZENDESK": {
+      "SUBDOMAIN": "tvs935",
+      "EMAIL": "krashwin2002@gmail.com",
+      "API_TOKEN": "2EDLpp6Nhm5VWGLOw2IB8EOsuPCLho2oaXUtl28t"
+    }
+  }

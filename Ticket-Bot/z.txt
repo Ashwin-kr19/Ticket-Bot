@@ -1,0 +1,1516 @@
+modules/auth.py:
+
+import bcrypt
+import sqlite3
+from modules.databases import DB_PATH
+
+def hash_password(password):
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+def verify_password(password, hashed_password):
+    return bcrypt.checkpw(password.encode("utf-8"), hashed_password.encode("utf-8"))
+
+def register_user(username, password):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    hashed_pw = hash_password(password)
+    try:
+        cursor.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, hashed_pw))
+        conn.commit()
+        conn.close()
+        return True
+    except sqlite3.IntegrityError:
+        conn.close()
+        return False
+
+def authenticate_user(username, password):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT password FROM users WHERE username = ?", (username,))
+    user = cursor.fetchone()
+    conn.close()
+    if user:
+        return verify_password(password, user[0])
+    return False
+
+modules/chat.py:
+
+class ChatHistory:
+    def __init__(self, max_history=5):
+        self.max_history = max_history
+        self.messages = []
+        self.conversation_pairs = []
+        self.user_details = None
+        self.problem_summary = None
+        self.awaiting_satisfaction = False
+
+    def add_message(self, role, content):
+        self.messages.append({"role": role, "content": content})
+        if role == "user":
+            self._current_query = content
+        elif role == "assistant" and hasattr(self, '_current_query'):
+            self.conversation_pairs.append((self._current_query, content))
+            self._maintain_history_window()
+
+    def _maintain_history_window(self):
+        if len(self.conversation_pairs) > self.max_history:
+            self.conversation_pairs = self.conversation_pairs[-self.max_history:]
+
+    def get_messages(self):
+        return self.messages
+
+    def get_conversation_pairs(self):
+        return self.conversation_pairs
+
+    def clear_history(self):
+        self.messages.clear()
+        self.conversation_pairs.clear()
+
+
+
+modules/databases.py:
+
+
+import sqlite3
+import os
+
+# Constants
+DB_PATH = "users.db"
+SUMMARIES_DIR = "problem_summaries"
+
+# Ensure summaries directory exists
+os.makedirs(SUMMARIES_DIR, exist_ok=True)
+
+def create_tables():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL
+        )''')
+    
+    cursor.execute('''CREATE TABLE IF NOT EXISTS ticket_details (
+            chat_id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            full_name TEXT NOT NULL,
+            email TEXT NOT NULL,
+            problem_summary TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (username) REFERENCES users(username)
+        )''')
+    conn.commit()
+    conn.close()
+
+
+modules/llm_service.py:
+
+
+import os
+import json
+from langchain_pinecone import PineconeVectorStore
+from langchain.chains import ConversationalRetrievalChain
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain.embeddings.cohere import CohereEmbeddings
+
+# Load API Keys
+with open("api_keys.json", "r") as file:
+    api_keys = json.load(file)
+
+os.environ["COHERE_API_KEY"] = api_keys["COHERE_API_KEY"]
+os.environ["PINECONE_API_KEY"] = api_keys["PINECONE_API_KEY"]
+os.environ["GOOGLE_API_KEY"] = api_keys["GOOGLE_API_KEY"]
+
+def initialize_retrieval_chain():
+    try:
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-1.5-flash",
+            google_api_key=os.environ["GOOGLE_API_KEY"],
+            temperature=0.3,
+            max_tokens=1524,
+            timeout=45,
+            max_retries=3,
+            user_agent="ticket"
+        )
+
+        embeddings = CohereEmbeddings(
+            model="embed-english-v3.0", 
+            cohere_api_key=os.environ["COHERE_API_KEY"],
+            user_agent="ticket"
+        )
+        retriever = PineconeVectorStore.from_existing_index("ticket", embeddings).as_retriever(search_kwargs={"k": 5})
+
+        return ConversationalRetrievalChain.from_llm(llm=llm, retriever=retriever, return_source_documents=False, verbose=True)
+
+    except Exception as e:
+        raise ValueError(f"Error during AI assistant initialization: {str(e)}")
+
+
+modules/summaries.py:
+
+import datetime
+import sqlite3
+import streamlit as st
+from modules.databases import DB_PATH, SUMMARIES_DIR
+from modules.zen_desk import create_zendesk_ticket
+
+def generate_problem_summary(chat_history, llm):
+    """Generate a technical problem summary from chat history including user details"""
+    # Extract user details and relevant messages
+    user_details = {"full_name": None, "email": None}
+    relevant_messages = []
+    user_details_complete = False
+    
+    for msg in chat_history:
+        # Extract full name from first user message
+        if msg["role"] == "user" and not user_details["full_name"]:
+            user_details["full_name"] = msg["content"]
+            continue
+            
+        # Extract email from second user message
+        if msg["role"] == "user" and not user_details["email"] and "@" in msg["content"]:
+            user_details["email"] = msg["content"]
+            continue
+            
+        # Skip initial user detail collection messages
+        if not user_details_complete:
+            if msg["content"].startswith("Thank you for providing your details"):
+                user_details_complete = True
+            continue
+        
+        # Add relevant messages to our conversation history
+        if msg["role"] in ["user", "assistant"]:
+            relevant_messages.append(f"{msg['role'].capitalize()}: {msg['content']}")
+    
+    # If we don't have enough relevant messages, return early
+    if len(relevant_messages) < 2:
+        return "Insufficient conversation history to generate summary."
+    
+    # Create a detailed prompt for the LLM
+    prompt = """Based on the following support conversation and user details, create a comprehensive technical problem summary.
+
+User Details:
+Full Name: {full_name}
+Email: {email}
+
+Conversation:
+{chat_text}
+
+Generate a summary that includes:
+1. User Information
+2. The core issue reported
+3. Key details provided by the user
+4. Current troubleshooting status
+5. Any solutions attempted
+
+Format the summary in a clear, technical style. Include all user details and focus on the relevant technical information."""
+    
+    # Join the relevant messages with newlines
+    chat_text = "\n".join(relevant_messages)
+    
+    try:
+        # Generate the summary using the LLM
+        response = llm.invoke(
+            prompt.format(
+                full_name=user_details["full_name"],
+                email=user_details["email"],
+                chat_text=chat_text
+            )
+        )
+        return response.content.strip()
+    except Exception as e:
+        return f"Error generating summary: {str(e)}"
+
+def save_ticket_details(chat_id, username, full_name, email, problem_summary):
+    """Save ticket details to the database and to a file, and optionally to Zendesk"""
+    # Save to database
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    db_success = False
+    try:
+        cursor.execute("""
+            INSERT INTO ticket_details (chat_id, username, full_name, email, problem_summary)
+            VALUES (?, ?, ?, ?, ?)
+        """, (chat_id, username, full_name, email, problem_summary))
+        conn.commit()
+        db_success = True
+    except sqlite3.Error as e:
+        print(f"Database error: {e}")
+    finally:
+        conn.close()
+    
+    # Save to file
+    file_success = False
+    filename = ""
+    try:
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{SUMMARIES_DIR}/{username}_{timestamp}_{chat_id[:8]}.txt"
+        
+        with open(filename, "w") as file:
+            file.write(f"Ticket ID: {chat_id}\n")
+            file.write(f"Username: {username}\n")
+            file.write(f"Full Name: {full_name}\n")
+            file.write(f"Email: {email}\n")
+            file.write(f"Creation Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            file.write("\n------ PROBLEM SUMMARY ------\n\n")
+            file.write(problem_summary)
+        file_success = True
+    except Exception as e:
+        print(f"File write error: {e}")
+    
+    # Offer to create Zendesk ticket if file was saved successfully
+    if db_success and file_success:
+        if st.button("🎫 Create Zendesk Ticket Now"):
+            formatted_summary = f"Ticket ID: {chat_id}\nUsername: {username}\nFull Name: {full_name}\nEmail: {email}\nCreation Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n------ PROBLEM SUMMARY ------\n\n{problem_summary}"
+            success, message = create_zendesk_ticket(formatted_summary, full_name, email)
+            if success:
+                st.success(message)
+            else:
+                st.error(message)
+    
+    return db_success and file_success
+
+def get_saved_summaries(username):
+    """Fetch all summaries for a specific user from database"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT chat_id, full_name, email, problem_summary, created_at 
+            FROM ticket_details 
+            WHERE username = ?
+            ORDER BY created_at DESC
+        """, (username,))
+        results = cursor.fetchall()
+        return results
+    except sqlite3.Error as e:
+        print(f"Error fetching summaries: {e}")
+        return []
+    finally:
+        conn.close()
+
+def generate_and_save_ticket(chat_history, chat_id, username, llm):
+    """Generate a problem summary and save it as a ticket, with option to create Zendesk ticket"""
+    # Generate the problem summary
+    problem_summary = generate_problem_summary(chat_history, llm)
+    
+    if problem_summary == "Insufficient conversation history to generate summary.":
+        return False, problem_summary
+    
+    # Extract user details from chat history
+    full_name = None
+    email = None
+    
+    for msg in chat_history:
+        if msg["role"] == "user" and not full_name:
+            full_name = msg["content"]
+            continue
+        if msg["role"] == "user" and not email and "@" in msg["content"]:
+            email = msg["content"]
+            break
+    
+    # Save the ticket details
+    success = save_ticket_details(chat_id, username, full_name, email, problem_summary)
+    
+    if success:
+        return True, problem_summary
+    else:
+        return False, "Error saving ticket details."
+
+def create_zendesk_from_summary(chat_id, username, full_name, email, problem_summary):
+    """Create a Zendesk ticket from an existing problem summary"""
+    formatted_summary = f"Ticket ID: {chat_id}\nUsername: {username}\nFull Name: {full_name}\nEmail: {email}\nCreation Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n------ PROBLEM SUMMARY ------\n\n{problem_summary}"
+    return create_zendesk_ticket(formatted_summary, full_name, email)
+
+
+modules/ticket_manager.py:
+
+import os
+import sqlite3
+import json
+import requests
+import streamlit as st
+
+ZENDESK_SUBDOMAIN = "tvs8274"
+ZENDESK_EMAIL = "20pd06@psgtech.ac.in"
+ZENDESK_API_TOKEN = "yw1K4JFOJnMkYLTBW3gO13CMBVKMBfryk0vO93uc"
+
+def generate_problem_summary(chat_history, llm):
+    user_details = {"full_name": None, "email": None}
+    relevant_messages = []
+    user_details_complete = False
+    
+    for msg in chat_history:
+        if msg["role"] == "user" and not user_details["full_name"]:
+            user_details["full_name"] = msg["content"]
+            continue
+        if msg["role"] == "user" and not user_details["email"] and "@" in msg["content"]:
+            user_details["email"] = msg["content"]
+            continue
+        if not user_details_complete:
+            if msg["content"].startswith("Thank you for providing your details"):
+                user_details_complete = True
+            continue
+        if msg["role"] in ["user", "assistant"]:
+            relevant_messages.append(f"{msg['role'].capitalize()}: {msg['content']}")
+    
+    if len(relevant_messages) < 2:
+        return "Insufficient conversation history to generate summary."
+    
+    prompt = """Based on the following support conversation and user details, create a comprehensive technical problem summary.
+User Details:
+Full Name: {full_name}
+Email: {email}
+Conversation:
+{chat_text}
+Generate a summary that includes:
+1. User Information
+2. The core issue reported
+3. Key details provided by the user
+4. Current troubleshooting status
+5. Any solutions attempted
+Format the summary in a clear, technical style. Include all user details and focus on the relevant technical information."""
+    
+    chat_text = "\n".join(relevant_messages)
+    try:
+        response = llm.invoke(prompt.format(full_name=user_details["full_name"], email=user_details["email"], chat_text=chat_text))
+        return response.content.strip()
+    except Exception as e:
+        return f"Error generating summary: {str(e)}"
+
+def save_ticket_details(ticket_id, username, full_name, email, problem_summary):
+    try:
+        os.makedirs("summaries", exist_ok=True)
+        with open(f"summaries/{ticket_id}.txt", "w") as f:
+            f.write(f"Ticket ID: {ticket_id}\n")
+            f.write(f"Agent: {username}\n")
+            f.write(f"Customer Name: {full_name}\n")
+            f.write(f"Customer Email: {email}\n")
+            f.write(f"Date: {st.session_state.get('current_timestamp', 'N/A')}\n\n")
+            f.write(f"Problem Summary:\n{problem_summary}")
+        
+        conn = sqlite3.connect('ticketbot.db')
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS ticket_summaries (
+            ticket_id TEXT PRIMARY KEY,
+            username TEXT,
+            full_name TEXT,
+            email TEXT,
+            problem_summary TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
+        c.execute("INSERT INTO ticket_summaries (ticket_id, username, full_name, email, problem_summary) VALUES (?, ?, ?, ?, ?)",
+                  (ticket_id, username, full_name, email, problem_summary))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Error saving ticket details: {e}")
+        return False
+
+def get_saved_summaries(username):
+    try:
+        conn = sqlite3.connect('ticketbot.db')
+        c = conn.cursor()
+        c.execute("SELECT ticket_id, full_name, email, problem_summary, created_at FROM ticket_summaries WHERE username = ? ORDER BY created_at DESC", (username,))
+        summaries = c.fetchall()
+        conn.close()
+        return summaries
+    except Exception as e:
+        print(f"Error retrieving summaries: {e}")
+        return []
+
+def create_zendesk_ticket(problem_summary, user_name=None, user_email=None):
+    url = f"https://{ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets.json"
+    ticket = {
+        "subject": f"Support Request: {user_name if user_name else 'New User'}",
+        "comment": {"body": problem_summary},
+        "priority": "normal"
+    }
+    if user_email:
+        ticket["requester"] = {"email": user_email, "name": user_name if user_name else "Requester"}
+    ticket_data = {"ticket": ticket}
+    headers = {"Content-Type": "application/json"}
+    auth = (f"{ZENDESK_EMAIL}/token", ZENDESK_API_TOKEN)
+    
+    try:
+        response = requests.post(url, auth=auth, headers=headers, data=json.dumps(ticket_data), timeout=10)
+        if response.status_code == 201:
+            ticket_id = response.json()['ticket']['id']
+            ticket_url = f"https://{ZENDESK_SUBDOMAIN}.zendesk.com/agent/tickets/{ticket_id}"
+            return True, f"Ticket #{ticket_id} created successfully.", ticket_url
+        return False, f"Failed to create ticket: {response.text}", None
+    except Exception as e:
+        return False, f"Unexpected error: {str(e)}", None
+
+modules/utils.py:
+
+import json
+from deep_translator import GoogleTranslator
+
+def load_api_keys():
+    try:
+        with open('api_keys.json', 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Error loading API keys: {e}")
+        return {}
+
+def translate_text(text, dest_lang):
+    try:
+        translated = GoogleTranslator(source='auto', target=dest_lang).translate(text)
+        return translated
+    except Exception as e:
+        return f"Error translating text: {str(e)}"
+
+LANGUAGES = {
+    "en": "English",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+    "hi": "Hindi",
+    "id": "Indonesian",
+    "ms": "Malay",
+    "tl": "Tagalog",
+    "vi": "Vietnamese",
+    "th": "Thai",
+    "my": "Burmese",
+    "km": "Khmer",
+    "lo": "Lao",
+    "fil": "Filipino",
+    "tet": "Tetum",
+}
+
+
+templates/chat.html:
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TicketBot - Support Chat</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="menu-toggle" onclick="toggleSidebar()">☰</div>
+    <div class="header">
+        <h1>TicketBot</h1>
+        <p>Logged in as: {{ username }} | <a href="{{ url_for('logout') }}">Logout</a></p>
+    </div>
+    <div class="sidebar">
+        <form method="POST">
+            <button type="submit" name="action" value="new_chat" class="new-chat-btn" aria-label="Start a new chat">New Chat</button>
+        </form>
+        <h3>Chats</h3>
+        <ul>
+            {% for chat_id in chats.keys() %}
+                <li>
+                    <div style="display: flex; gap: 10px; align-items: center;">
+                        <form method="POST" style="display:inline; flex-grow: 1;">
+                            <input type="hidden" name="chat_id" value="{{ chat_id }}">
+                            <button type="submit" name="action" value="switch_chat">{{ chat_id[:8] }}</button>
+                        </form>
+                        <form method="POST" onsubmit="return confirm('Are you sure you want to delete this chat? This action cannot be undone.');" style="display:inline;">
+                            <input type="hidden" name="chat_id" value="{{ chat_id }}">
+                            <button type="submit" name="action" value="delete_chat" class="delete-chat-btn" aria-label="Delete chat {{ chat_id[:8] }}">🗑️</button>
+                        </form>
+                    </div>
+                </li>
+            {% endfor %}
+        </ul>
+        <a href="{{ url_for('summaries') }}" class="view-summaries-btn" aria-label="View ticket summaries">View Summaries</a>
+        <h3>Language</h3>
+        <form method="GET">
+            <select name="lang" onchange="this.form.submit()" aria-label="Select language">
+                {% for code, name in languages.items() %}
+                    <option value="{{ code }}" {% if code == lang_code %}selected{% endif %}>{{ name }}</option>
+                {% endfor %}
+            </select>
+        </form>
+    </div>
+    <div class="chat-container">
+        <div class="messages">
+            {% if chat_history %}
+                {% set show_satisfaction_buttons = current_chat is not none and chats[current_chat].awaiting_satisfaction %}
+                {% for message in chat_history %}
+                    {% if message.role == 'user' %}
+                        <div class="user-message">
+                            <div class="message-content">{{ message.content }}</div>
+                            <div class="user-avatar">U</div>
+                        </div>
+                    {% else %}
+                        <div class="bot-message">
+                            <div class="bot-avatar"></div>
+                            <div class="message-content">
+                                {{ message.content | safe }}
+                                {% if loop.last and show_satisfaction_buttons %}
+                                    <div class="satisfaction-buttons">
+                                        <form method="POST" style="display:inline;">
+                                            <input type="hidden" name="satisfaction_response" value="yes">
+                                            <button type="submit" name="action" value="satisfaction_response" class="satisfaction-btn yes-btn" aria-label="Satisfied with resolution">Yes</button>
+                                        </form>
+                                        <form method="POST" id="no-satisfaction-form" style="display:inline;">
+                                            <input type="hidden" name="satisfaction_response" value="no">
+                                            <input type="hidden" name="action" value="satisfaction_response">
+                                            <button type="button" class="satisfaction-btn no-btn" onclick="handleNoSatisfaction()" aria-label="Not satisfied with resolution">No</button>
+                                        </form>
+                                    </div>
+                                {% endif %}
+                            </div>
+                        </div>
+                    {% endif %}
+                {% endfor %}
+            {% else %}
+                <div class="bot-message">
+                    <div class="bot-avatar"></div>
+                    <div class="message-content">Hello! I'm TicketBot, your dedicated support assistant. How can I assist you today?</div>
+                </div>
+            {% endif %}
+        </div>
+        <form method="POST" class="message-form">
+            <input type="text" name="message" placeholder="Type your message..." required aria-label="Type your message">
+            <button type="submit" name="action" value="send_message" aria-label="Send message"></button>
+        </form>
+        {% if chat_history|length > 3 and current_chat in chats %}
+            <div class="action-buttons">
+                <form method="POST">
+                    <button type="submit" name="action" value="generate_summary" aria-label="Generate ticket summary">Generate Summary</button>
+                </form>
+                {% if problem_summary %}
+                    <div class="summary">{{ problem_summary }}</div>
+                    <form method="POST">
+                        <button type="submit" name="action" value="create_zendesk" aria-label="Create Zendesk ticket">Create Zendesk Ticket</button>
+                    </form>
+                {% endif %}
+            </div>
+        {% endif %}
+    </div>
+
+    <!-- Add a hidden iframe for Zendesk widget interaction -->
+    <iframe id="zendesk-iframe" style="display:none; position:fixed; bottom:0; right:0; width:350px; height:500px; border:none; z-index:1000;"></iframe>
+
+    <script>
+        function toggleSidebar() {
+            document.querySelector('.sidebar').classList.toggle('active');
+        }
+
+        // Smooth scroll to latest message
+        const messages = document.querySelector('.messages');
+        messages.scrollTop = messages.scrollHeight;
+
+        // Define zE function if it doesn't exist
+        window.zE = window.zE || function() {
+            (zE.q = zE.q || []).push(arguments);
+        };
+
+        // Session storage key for tracking Zendesk widget state
+        const ZENDESK_WIDGET_SHOWN = 'zendeskWidgetShown';
+
+        window.onload = function() {
+            if (sessionStorage.getItem(ZENDESK_WIDGET_SHOWN) === 'true') {
+                const form = document.getElementById('no-satisfaction-form');
+                if (form) {
+                    sessionStorage.removeItem(ZENDESK_WIDGET_SHOWN);
+                    form.submit();
+                }
+            }
+        };
+
+        function handleNoSatisfaction() {
+            sessionStorage.setItem(ZENDESK_WIDGET_SHOWN, 'true');
+            const messagesDiv = document.querySelector('.messages');
+            const statusMsg = document.createElement('div');
+            statusMsg.className = 'bot-message';
+            statusMsg.innerHTML = `
+                <div class="bot-avatar"></div>
+                <div class="message-content">
+                    Connecting you with a live support agent. Please wait...
+                </div>
+            `;
+            messagesDiv.appendChild(statusMsg);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            loadZendeskWidget();
+        }
+
+        function loadZendeskWidget() {
+            if (!document.getElementById('ze-snippet')) {
+                const script = document.createElement('script');
+                script.id = 'ze-snippet';
+                script.src = 'https://static.zdassets.com/ekr/snippet.js?key=27a099ab-0e24-4079-acad-b7db1f15d0b0';
+                script.async = true;
+                script.onload = function() {
+                    console.log('Zendesk widget script loaded successfully.');
+                    openZendeskWidget();
+                };
+                script.onerror = function() {
+                    console.error('Failed to load Zendesk widget script.');
+                    handleWidgetFailure();
+                };
+                document.body.appendChild(script);
+            } else {
+                openZendeskWidget();
+            }
+        }
+
+        function openZendeskWidget() {
+            if (typeof zE !== 'undefined') {
+                zE('webWidget', 'updateSettings', {
+                    webWidget: {
+                        chat: {
+                            title: 'Live Support',
+                            prechatForm: {
+                                greeting: {
+                                    '*': 'Please fill out the form below to chat with an agent.'
+                                }
+                            }
+                        }
+                    }
+                });
+                zE('webWidget', 'open');
+                setTimeout(function() {
+                    zE('webWidget:on', 'close', function() {
+                        const form = document.getElementById('no-satisfaction-form');
+                        if (form) form.submit();
+                    });
+                }, 1000);
+            } else {
+                handleWidgetFailure();
+            }
+        }
+
+        function handleWidgetFailure() {
+            const messagesDiv = document.querySelector('.messages');
+            const fallbackMsg = document.createElement('div');
+            fallbackMsg.className = 'bot-message';
+            fallbackMsg.innerHTML = `
+                <div class="bot-avatar"></div>
+                <div class="message-content">
+                    Sorry, we couldn't connect you to live chat at the moment. Creating a support ticket instead...
+                </div>
+            `;
+            messagesDiv.appendChild(fallbackMsg);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            setTimeout(function() {
+                const form = document.getElementById('no-satisfaction-form');
+                if (form) form.submit();
+            }, 2000);
+        }
+    </script>
+</body>
+</html>
+
+templates/login.html:
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - TicketBot</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        .login-container {
+            max-width: 450px;
+            margin: 80px auto;
+            background-color: #fff;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+            display: flex;
+        }
+        
+        .login-sidebar {
+            width: 8px;
+            background-color: #2e8b57;
+        }
+        
+        .login-content {
+            flex: 1;
+            padding: 30px 40px;
+        }
+        
+        .login-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 25px;
+        }
+        
+        .login-icon {
+            margin-right: 10px;
+            color: #1a3e3e;
+        }
+        
+        .login-title {
+            margin: 0;
+            color: #333;
+            font-size: 20px;
+            font-weight: 500;
+        }
+        
+        .form-group {
+            margin-bottom: 20px;
+        }
+        
+        .form-label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 500;
+            color: #555;
+        }
+        
+        .form-input {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+        
+        .form-input:focus {
+            border-color: #2e8b57;
+            outline: none;
+        }
+        
+        .login-btn {
+            width: 100%;
+            padding: 12px;
+            background-color: #2e8b57;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 500;
+            cursor: pointer;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            transition: background-color 0.3s;
+        }
+        
+        .login-btn:hover {
+            background-color: #3cb371;
+        }
+        
+        .login-footer {
+            margin-top: 20px;
+            text-align: center;
+            font-size: 14px;
+            color: #666;
+        }
+        
+        .login-footer a {
+            color: #2e8b57;
+            text-decoration: none;
+            font-weight: 500;
+        }
+        
+        .login-footer a:hover {
+            text-decoration: underline;
+        }
+        
+        .top-header {
+            background-color: #1a3e3e;
+            color: white;
+            padding: 15px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .top-header h1 {
+            margin: 0;
+            font-size: 20px;
+            font-weight: 500;
+        }
+        
+        .top-header a {
+            color: #fff;
+            text-decoration: none;
+            font-weight: 500;
+            padding: 8px 15px;
+            border-radius: 5px;
+            transition: background-color 0.3s;
+        }
+        
+        .top-header a:hover {
+            background-color: rgba(255, 255, 255, 0.1);
+        }
+        
+        .error-message {
+            background-color: #f8d7da;
+            color: #dc3545;
+            padding: 12px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+        }
+        
+        .error-icon {
+            margin-right: 10px;
+            color: #dc3545;
+        }
+    </style>
+</head>
+<body>
+    <div class="top-header">
+        <h1>TicketBot</h1>
+        <a href="{{ url_for('register') }}">Register</a>
+    </div>
+    
+    <div class="login-container">
+        <div class="login-sidebar"></div>
+        <div class="login-content">
+            <div class="login-header">
+                <i class="fas fa-sign-in-alt login-icon"></i>
+                <h2 class="login-title">Login to TicketBot</h2>
+            </div>
+            
+            {% if error %}
+            <div class="error-message">
+                <i class="fas fa-exclamation-circle error-icon"></i>
+                {{ error }}
+            </div>
+            {% endif %}
+            
+            <form method="POST" action="{{ url_for('login') }}">
+                <div class="form-group">
+                    <label for="username" class="form-label">Username:</label>
+                    <input type="text" id="username" name="username" class="form-input" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="password" class="form-label">Password:</label>
+                    <input type="password" id="password" name="password" class="form-input" required>
+                </div>
+                
+                <button type="submit" class="login-btn">
+                    <i class="fas fa-arrow-right" style="margin-right: 8px;"></i>Login
+                </button>
+            </form>
+            
+            <div class="login-footer">
+                <p>Don't have an account? <a href="{{ url_for('register') }}">Register here</a></p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+
+templates/register.html:
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Register - TicketBot</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        .login-container {
+            max-width: 450px;
+            margin: 80px auto;
+            background-color: #fff;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+            display: flex;
+        }
+        
+        .login-sidebar {
+            width: 8px;
+            background-color: #2e8b57;
+        }
+        
+        .login-content {
+            flex: 1;
+            padding: 30px 40px;
+        }
+        
+        .login-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 25px;
+        }
+        
+        .login-icon {
+            margin-right: 10px;
+            color: #1a3e3e;
+        }
+        
+        .login-title {
+            margin: 0;
+            color: #333;
+            font-size: 20px;
+            font-weight: 500;
+        }
+        
+        .form-group {
+            margin-bottom: 20px;
+        }
+        
+        .form-label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 500;
+            color: #555;
+        }
+        
+        .form-input {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+        
+        .form-input:focus {
+            border-color: #2e8b57;
+            outline: none;
+        }
+        
+        .login-btn {
+            width: 100%;
+            padding: 12px;
+            background-color: #2e8b57;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 500;
+            cursor: pointer;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            transition: background-color 0.3s;
+        }
+        
+        .login-btn:hover {
+            background-color: #3cb371;
+        }
+        
+        .login-footer {
+            margin-top: 20px;
+            text-align: center;
+            font-size: 14px;
+            color: #666;
+        }
+        
+        .login-footer a {
+            color: #2e8b57;
+            text-decoration: none;
+            font-weight: 500;
+        }
+        
+        .login-footer a:hover {
+            text-decoration: underline;
+        }
+        
+        .top-header {
+            background-color: #1a3e3e;
+            color: white;
+            padding: 15px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .top-header h1 {
+            margin: 0;
+            font-size: 20px;
+            font-weight: 500;
+        }
+        
+        .top-header a {
+            color: #fff;
+            text-decoration: none;
+            font-weight: 500;
+            padding: 8px 15px;
+            border-radius: 5px;
+            transition: background-color 0.3s;
+        }
+        
+        .top-header a:hover {
+            background-color: rgba(255, 255, 255, 0.1);
+        }
+        
+        .error-message {
+            background-color: #f8d7da;
+            color: #dc3545;
+            padding: 12px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+        }
+        
+        .error-icon {
+            margin-right: 10px;
+            color: #dc3545;
+        }
+    </style>
+</head>
+<body>
+    <div class="top-header">
+        <h1>TicketBot</h1>
+        <a href="{{ url_for('login') }}">Login</a>
+    </div>
+    
+    <div class="login-container">
+        <div class="login-sidebar"></div>
+        <div class="login-content">
+            <div class="login-header">
+                <i class="fas fa-user-plus login-icon"></i>
+                <h2 class="login-title">Register for TicketBot</h2>
+            </div>
+            
+            {% if error %}
+            <div class="error-message">
+                <i class="fas fa-exclamation-circle error-icon"></i>
+                {{ error }}
+            </div>
+            {% endif %}
+            
+            <form method="POST" action="{{ url_for('register') }}">
+                <div class="form-group">
+                    <label for="username" class="form-label">Username:</label>
+                    <input type="text" id="username" name="username" class="form-input" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="password" class="form-label">Password:</label>
+                    <input type="password" id="password" name="password" class="form-input" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="confirm_password" class="form-label">Confirm Password:</label>
+                    <input type="password" id="confirm_password" name="confirm_password" class="form-input" required>
+                </div>
+                
+                <button type="submit" class="login-btn">
+                    <i class="fas fa-user-check" style="margin-right: 8px;"></i>Register
+                </button>
+            </form>
+            
+            <div class="login-footer">
+                <p>Already have an account? <a href="{{ url_for('login') }}">Login here</a></p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+
+templates/summaries.html:
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Summaries - TicketBot</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: Arial, sans-serif;
+            height: 100vh; /* Ensure body takes full viewport height */
+            overflow: auto; /* Allow scrolling on the body if needed */
+        }
+        .header {
+            background-color: #1a3e3e;
+            color: white;
+            padding: 15px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: fixed;
+            top: 0;
+            width: 100%;
+            z-index: 1000;
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 20px;
+            font-weight: 500;
+        }
+        .header a {
+            color: #fff;
+            text-decoration: none;
+            font-weight: 500;
+        }
+        .container {
+            margin-top: 80px; /* Offset for fixed header */
+            padding: 20px;
+            max-width: 800px;
+            margin-left: auto;
+            margin-right: auto;
+            min-height: calc(100vh - 80px); /* Ensure container fills remaining height */
+            overflow-y: auto; /* Enable vertical scrolling */
+        }
+        .back-link {
+            display: inline-block;
+            margin-bottom: 20px;
+            color: #2e8b57;
+            text-decoration: none;
+            font-weight: 500;
+        }
+        .back-link:hover {
+            text-decoration: underline;
+        }
+        .summary-card {
+            background-color: #fff;
+            border: 1px solid #e0e0e0;
+            border-radius: 5px;
+            padding: 15px;
+            margin-bottom: 15px;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+        }
+        .summary-card h3 {
+            margin-top: 0;
+            color: #333;
+        }
+        .summary-card p {
+            margin: 5px 0;
+            color: #555;
+        }
+        .zendesk-link {
+            display: inline-block;
+            margin-top: 10px;
+            padding: 8px 15px;
+            background-color: #2e8b57;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            font-weight: 500;
+        }
+        .zendesk-link:hover {
+            background-color: #3cb371;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>TicketBot Summaries</h1>
+        <p>Logged in as: {{ username }} | <a href="{{ url_for('logout') }}">Logout</a></p>
+    </div>
+    <div class="container">
+        <a href="{{ url_for('chat') }}" class="back-link">Back to Chat</a>
+        <h2>Summary History</h2>
+        {% if summaries %}
+            {% for summary in summaries %}
+                <div class="summary-card">
+                    <h3>Ticket {{ summary[0][:8] }} - {{ summary[4] }}</h3>
+                    <p><strong>Full Name:</strong> {{ summary[1] }}</p>
+                    <p><strong>Email:</strong> {{ summary[2] }}</p>
+                    <p><strong>Problem Summary:</strong> {{ summary[3] }}</p>
+                    <a href="{{ url_for('create_zendesk_from_summary', chat_id=summary[0]) }}" class="zendesk-link">Create Zendesk Ticket</a>
+                </div>
+            {% endfor %}
+        {% else %}
+            <p>No summaries found.</p>
+        {% endif %}
+    </div>
+</body>
+</html>
+
+
+
+
+appli.py:
+
+from flask import Flask, render_template, request, redirect, url_for, session, jsonify
+import uuid
+import datetime
+from modules.auth import register_user, authenticate_user
+from modules.databases import create_tables
+from modules.chat import ChatHistory
+from modules.llm_service import initialize_retrieval_chain, ChatGoogleGenerativeAI
+from modules.ticket_manager import generate_problem_summary, save_ticket_details, get_saved_summaries, create_zendesk_ticket
+from modules.utils import load_api_keys, translate_text, LANGUAGES
+
+app = Flask(__name__)
+app.secret_key = "your-secret-key-here"  # Replace with a secure key
+
+# Fallback classes for LLM and chain
+class FallbackLLM:
+    def invoke(self, prompt):
+        class Response:
+            def __init__(self, content):
+                self.content = content
+        return Response("I'm currently experiencing connection issues. Please try again later or contact support if this persists.")
+
+class FallbackChain:
+    def __call__(self, inputs):
+        return {"answer": "I'm unable to access the knowledge base at the moment. Please try basic troubleshooting steps or contact technical support."}
+
+# Global storage for chats
+if 'chats' not in app.config:
+    app.config['chats'] = {}
+
+def initialize_system():
+    if 'current_chat' not in session:
+        session['current_chat'] = None
+    if 'qa_chain' not in app.config:
+        app.config['qa_chain'] = None
+    if 'llm' not in app.config:
+        app.config['llm'] = None
+    if 'current_problem_summary' not in session:
+        session['current_problem_summary'] = {}
+    if 'current_timestamp' not in session:
+        session['current_timestamp'] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:S")
+    if 'api_keys' not in app.config:
+        app.config['api_keys'] = load_api_keys()
+    if 'user_details' not in session:
+        session['user_details'] = None
+
+def evaluate_and_respond(query, retriever_answer, llm, chat_history):
+    # Handle satisfaction response
+    if chat_history.awaiting_satisfaction and query.lower() in ['yes', 'no']:
+        chat_history.awaiting_satisfaction = False
+        if query.lower() == 'yes':
+            return "I'm glad I could help! If you have any more questions, feel free to start a new chat. Goodbye! 😊"
+        elif query.lower() == 'no':
+            return "I'm sorry I couldn't fully resolve your issue. I'm opening a live chat with an agent to assist you further."
+        return "Please respond with 'yes' if satisfied or 'no' if you'd like to connect with a live agent."
+
+    # Process normal query even if awaiting satisfaction
+    system_prompt = """You are a helpful customer support AI assistant. Your responses should be:
+    1. Direct and professional
+    2. Focused on solving the user's issue
+    3. Free of any meta-commentary or evaluation prefixes
+    4. Clear and actionable"""
+    user_prompt = f"""User query: {query}
+    Context from knowledge base: {retriever_answer}
+    Provide a direct response to help the user. Do not include any evaluation statements or prefixes."""
+    full_prompt = f"{system_prompt}\n\n{user_prompt}"
+    
+    try:
+        response = llm.invoke(full_prompt)
+        final_response = response.content.replace("Response:", "").replace("Answer:", "").strip()
+        if final_response.startswith("The knowledge base"):
+            final_response = " ".join(final_response.split()[5:])
+        if not final_response.startswith("I'm having trouble") and not final_response.startswith("Error"):
+            chat_history.awaiting_satisfaction = True
+            return f"{final_response}\n\nAre you satisfied with this resolution? Please respond with 'yes' or 'no'."
+        return final_response
+    except Exception as e:
+        return f"I'm having trouble processing your request. Could you please try rephrasing or provide more details? Error: {str(e)}"
+
+@app.route('/')
+def index():
+    if 'username' not in session:
+        return redirect(url_for('login'))
+    if not session.get('user_details'):
+        return redirect(url_for('user_details'))
+    return redirect(url_for('chat'))
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        if authenticate_user(username, password):
+            session['username'] = username
+            initialize_system()
+            return redirect(url_for('user_details'))
+        return render_template('login.html', error="Invalid username or password")
+    return render_template('login.html')
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        if register_user(username, password):
+            return redirect(url_for('login'))
+        return render_template('register.html', error="Username already exists")
+    return render_template('register.html')
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    app.config['chats'] = {}
+    return redirect(url_for('login'))
+
+@app.route('/user_details', methods=['GET', 'POST'])
+def user_details():
+    if 'username' not in session:
+        return redirect(url_for('login'))
+    
+    if request.method == 'POST':
+        full_name = request.form['full_name']
+        email = request.form['email']
+        contact_number = request.form['contact_number']
+        issue_description = request.form['issue_description']
+        
+        session['user_details'] = {
+            'full_name': full_name,
+            'email': email,
+            'contact_number': contact_number,
+            'issue_description': issue_description
+        }
+        return redirect(url_for('chat'))
+    
+    return render_template('user_details.html')
+
+@app.route('/chat', methods=['GET', 'POST'])
+def chat():
+    if 'username' not in session:
+        return redirect(url_for('login'))
+    if not session.get('user_details'):
+        return redirect(url_for('user_details'))
+    
+    initialize_system()
+    chats = app.config['chats']
+    current_chat = session['current_chat']
+    lang_code = request.args.get('lang', 'en')
+
+    if not app.config['llm']:
+        try:
+            google_api_key = app.config['api_keys'].get("GOOGLE_API_KEY", "dummy-key-for-testing")
+            app.config['llm'] = ChatGoogleGenerativeAI(
+                model="gemini-1.5-flash",
+                google_api_key=google_api_key,
+                temperature=0.3,
+                max_tokens=1524,
+            )
+            app.config['qa_chain'] = initialize_retrieval_chain()
+        except Exception as e:
+            print(f"Error initializing AI assistant: {str(e)}")
+            app.config['llm'] = FallbackLLM()
+            app.config['qa_chain'] = FallbackChain()
+
+    if request.method == 'POST':
+        action = request.form.get('action')
+        if action == 'new_chat':
+            chat_id = str(uuid.uuid4())
+            chats[chat_id] = ChatHistory(max_history=5)
+            chats[chat_id].user_details = session['user_details']
+            session['current_chat'] = chat_id
+            return redirect(url_for('chat', lang=lang_code))
+        
+        elif action == 'switch_chat':
+            chat_id = request.form.get('chat_id')
+            if chat_id in chats:
+                session['current_chat'] = chat_id
+            return redirect(url_for('chat', lang=lang_code))
+        
+        elif action == 'send_message':
+            query = request.form.get('message')
+            if query and current_chat and current_chat in chats:
+                current_chat_obj = chats[current_chat]
+                translated_query = translate_text(query, "en")
+                current_chat_obj.add_message("user", query)
+                
+                try:
+                    retriever_answer = app.config['qa_chain']({"question": translated_query, "chat_history": current_chat_obj.get_conversation_pairs()})["answer"]
+                except Exception as e:
+                    retriever_answer = f"Error retrieving answer: {str(e)}"
+                response = evaluate_and_respond(translated_query, retriever_answer, app.config['llm'], current_chat_obj)
+                
+                translated_response = translate_text(response, lang_code)
+                current_chat_obj.add_message("assistant", translated_response)
+                if "Goodbye" in response:
+                    chat_id = str(uuid.uuid4())
+                    chats[chat_id] = ChatHistory(max_history=5)
+                    chats[chat_id].user_details = session['user_details']
+                    session['current_chat'] = chat_id
+                return redirect(url_for('chat', lang=lang_code))
+        
+        elif action == 'satisfaction_response':
+            response = request.form.get('satisfaction_response')
+            if current_chat and current_chat in chats:
+                current_chat_obj = chats[current_chat]
+                translated_response = evaluate_and_respond(response, "", app.config['llm'], current_chat_obj)
+                current_chat_obj.add_message("user", response)
+                current_chat_obj.add_message("assistant", translated_response)
+                if "Goodbye" in translated_response:
+                    chat_id = str(uuid.uuid4())
+                    chats[chat_id] = ChatHistory(max_history=5)
+                    chats[chat_id].user_details = session['user_details']
+                    session['current_chat'] = chat_id
+            return redirect(url_for('chat', lang=lang_code))
+        
+        elif action == 'generate_summary' and current_chat and current_chat in chats:
+            current_chat_obj = chats[current_chat]
+            if len(current_chat_obj.get_messages()) > 3:
+                problem_summary = generate_problem_summary(current_chat_obj.get_messages(), app.config['llm'])
+                if "Insufficient conversation history" not in problem_summary:
+                    success = save_ticket_details(
+                        current_chat,
+                        session['username'],
+                        current_chat_obj.user_details.get('full_name', 'Unknown'),
+                        current_chat_obj.user_details.get('email', 'unknown@example.com'),
+                        problem_summary
+                    )
+                    if success:
+                        session['current_problem_summary'][current_chat] = problem_summary
+            return redirect(url_for('chat', lang=lang_code))
+        
+        elif action == 'create_zendesk' and current_chat in session['current_problem_summary'] and current_chat in chats:
+            current_chat_obj = chats[current_chat]
+            problem_summary = session['current_problem_summary'][current_chat]
+            user_name = current_chat_obj.user_details.get('full_name', 'Anonymous User')
+            user_email = current_chat_obj.user_details.get('email', 'anonymous@example.com')
+            success, message, ticket_url = create_zendesk_ticket(problem_summary, user_name, user_email)
+            return redirect(url_for('chat', lang=lang_code))
+        
+        elif action == 'delete_chat':
+            chat_id = request.form.get('chat_id')
+            if chat_id in chats:
+                if chat_id == session['current_chat']:
+                    session['current_chat'] = None
+                del chats[chat_id]
+                if not chats and 'current_chat' in session:
+                    session['current_chat'] = None
+                return redirect(url_for('chat', lang=lang_code))
+
+    if current_chat and current_chat not in chats:
+        current_chat = None
+        session['current_chat'] = None
+    if not current_chat:
+        if chats:
+            session['current_chat'] = next(iter(chats))
+        else:
+            chat_id = str(uuid.uuid4())
+            chats[chat_id] = ChatHistory(max_history=5)
+            chats[chat_id].user_details = session['user_details']
+            session['current_chat'] = chat_id
+    current_chat = session['current_chat']
+
+    current_chat_obj = chats.get(current_chat)
+    return render_template('chat.html', username=session['username'], chats=chats, current_chat=current_chat, 
+                           chat_history=current_chat_obj.get_messages() if current_chat_obj else [], 
+                           problem_summary=session['current_problem_summary'].get(current_chat, None),
+                           lang_code=lang_code, languages=LANGUAGES)
+
+@app.route('/summaries')
+def summaries():
+    if 'username' not in session:
+        return redirect(url_for('login'))
+    
+    summaries = get_saved_summaries(session['username'])
+    return render_template('summaries.html', summaries=summaries, username=session['username'])
+
+@app.route('/create_zendesk_from_summary/<chat_id>')
+def create_zendesk_from_summary(chat_id):
+    if 'username' not in session:
+        return redirect(url_for('login'))
+    
+    summaries = get_saved_summaries(session['username'])
+    for summary in summaries:
+        if summary[0] == chat_id:
+            success, message, ticket_url = create_zendesk_ticket(summary[3], summary[1], summary[2])
+            return redirect(url_for('summaries'))
+    return redirect(url_for('summaries'))
+
+if __name__ == "__main__":
+    create_tables()
+    app.run(debug=True, host='0.0.0.0', port=5001)

@@ -1,0 +1,36 @@
+Pre-Chat Form
+
+Before starting the chat, Bot will collect the following information from the customer:
+•	Name
+•	Email
+•	Contact Number
+•	Small Description of the Issue/Request
+
+Incident Tickets Handling Workflow
+
+Once the user enters the chat, the bot will guide them through the following steps based on the type of incident:
+1.           To Identify the Issue
+•	Bot will straight away ask: What is the issue you are facing?
+
+2.           Customer and Product Details
+•	Ask for Customer Name and Product Name after the 1st question.
+1.	Customer Name – Wheeltek, Celestina, New Nemar, Mazda, Motorace, First Valley Bank. 
+2.	Product Name – LOS, AIDC, UP, DENALI, IMD, ALPS, Autotech – MSC.
+
+3.           Specific Issue Handling
+•	If user Selects LOS as Product Name → Ask for Application ID
+•	If user mention Login Issue → Request a Screenshot
+•	If user mention Auto Logout Issue → Request a Screen Recording or ask which Module the user was accessing
+•	If user mention Payment Issue → Ask for Receipt Number/OR Number
+•	If user says TPIN Issue → Ask for the TPIN Number
+•	If user says Allocation related issue → Ask for: Screenshot and Collection Specialist Details (Full Name, User Name and Contact Number)
+•	Denali Login Issue → Ask for: EBT Name, Branch Role and Screenshot
+
+Request Handling Workflow
+
+For user requests the bot should follow these steps based on the type of request:
+
+1.           New User Request – Bot can collect the following details:  Employee ID/EBT Name, Full Name, Contact Number, Email ID, Role and Branch
+2.           User Request Modification for Example - If the user requests a contact number change, Bot should ask - Please share the new number you want to update.
+3.           Password Reset Request- Bot should first suggest trying the Forgot Password option on the login page. If that doesn’t work, ask for an error screenshot.
+4.           Request on Module - Bot should ask for: Branch, Role.

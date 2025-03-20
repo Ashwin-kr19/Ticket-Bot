@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TicketBot - Support Chat</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="menu-toggle" onclick="toggleSidebar()">☰</div>
+    <div class="header">
+        <h1>TicketBot</h1>
+        <p>Logged in as: {{ username }} | <a href="{{ url_for('logout') }}">Logout</a></p>
+    </div>
+    <div class="sidebar">
+        <form method="POST">
+            <button type="submit" name="action" value="new_chat" class="new-chat-btn" aria-label="Start a new chat">New Chat</button>
+        </form>
+        <h3>Chats</h3>
+        <ul>
+            {% for chat_id in chats.keys() %}
+                <li>
+                    <div style="display: flex; gap: 10px; align-items: center;">
+                        <form method="POST" style="display:inline; flex-grow: 1;">
+                            <input type="hidden" name="chat_id" value="{{ chat_id }}">
+                            <button type="submit" name="action" value="switch_chat">{{ chat_id[:8] }}</button>
+                        </form>
+                        <form method="POST" onsubmit="return confirm('Are you sure you want to delete this chat? This action cannot be undone.');" style="display:inline;">
+                            <input type="hidden" name="chat_id" value="{{ chat_id }}">
+                            <button type="submit" name="action" value="delete_chat" class="delete-chat-btn" aria-label="Delete chat {{ chat_id[:8] }}">🗑️</button>
+                        </form>
+                    </div>
+                </li>
+            {% endfor %}
+        </ul>
+        <a href="{{ url_for('summaries') }}" class="view-summaries-btn" aria-label="View ticket summaries">View Summaries</a>
+        <h3>Language</h3>
+        <form method="GET">
+            <select name="lang" onchange="this.form.submit()" aria-label="Select language">
+                {% for code, name in languages.items() %}
+                    <option value="{{ code }}" {% if code == lang_code %}selected{% endif %}>{{ name }}</option>
+                {% endfor %}
+            </select>
+        </form>
+    </div>
+    <div class="chat-container">
+        <div class="messages">
+            {% if chat_history %}
+                {% set show_satisfaction_buttons = current_chat is not none and chats[current_chat].awaiting_satisfaction %}
+                {% for message in chat_history %}
+                    {% if message.role == 'user' %}
+                        <div class="user-message">
+                            <div class="message-content">{{ message.content }}</div>
+                            <div class="user-avatar">U</div>
+                        </div>
+                    {% else %}
+                        <div class="bot-message">
+                            <div class="bot-avatar"></div>
+                            <div class="message-content">
+                                {{ message.content | safe }}
+                                {% if loop.last and show_satisfaction_buttons %}
+                                    <div class="satisfaction-buttons">
+                                        <form method="POST" style="display:inline;">
+                                            <input type="hidden" name="satisfaction_response" value="yes">
+                                            <button type="submit" name="action" value="satisfaction_response" class="satisfaction-btn yes-btn" aria-label="Satisfied with resolution">Yes</button>
+                                        </form>
+                                        <form method="POST" id="no-satisfaction-form" style="display:inline;">
+                                            <input type="hidden" name="satisfaction_response" value="no">
+                                            <input type="hidden" name="action" value="satisfaction_response">
+                                            <button type="button" class="satisfaction-btn no-btn" onclick="handleNoSatisfaction()" aria-label="Not satisfied with resolution">No</button>
+                                        </form>
+                                    </div>
+                                {% endif %}
+                            </div>
+                        </div>
+                    {% endif %}
+                {% endfor %}
+            {% else %}
+                <div class="bot-message">
+                    <div class="bot-avatar"></div>
+                    <div class="message-content">Hello! I'm TicketBot, your dedicated support assistant. What’s your full name?</div>
+                </div>
+            {% endif %}
+        </div>
+        <form method="POST" class="message-form">
+            <input type="text" name="message" placeholder="Type your message..." required aria-label="Type your message">
+            <button type="submit" name="action" value="send_message" aria-label="Send message"></button>
+        </form>
+        {% if chat_history|length > 3 and current_chat in chats %}
+            <div class="action-buttons">
+                <form method="POST">
+                    <button type="submit" name="action" value="generate_summary" aria-label="Generate ticket summary">Generate Summary</button>
+                </form>
+                {% if problem_summary %}
+                    <div class="summary">{{ problem_summary }}</div>
+                    <form method="POST">
+                        <button type="submit" name="action" value="create_zendesk" aria-label="Create Zendesk ticket">Create Zendesk Ticket</button>
+                    </form>
+                {% endif %}
+            </div>
+        {% endif %}
+    </div>
+
+    {% if session_data %}
+        <!-- Start of tvs8274 Zendesk Widget script -->
+        <script id="ze-snippet" src="https://static.zdassets.com/ekr/snippet.js?key=27a099ab-0e24-4079-acad-b7db1f15d0b0"> </script>
+        <!-- End of tvs8274 Zendesk Widget script -->
+        <script type="text/javascript">
+            // Log session data for debugging
+            console.log('Session data:', '{{ session_data | tojson | safe }}');
+
+            // Data to send to Zendesk
+            const ticketData = {
+                Application: '{{ session_data.get("Application", "") | tojson | safe }}',
+                Created_Date: '{{ session_data.get("Created_Date", "") | tojson | safe }}',
+                Customer: '{{ session_data.get("Customer", "") | tojson | safe }}',
+                Email_id: '{{ session_data.get("Email_id", "") | tojson | safe }}',
+                Incident_Description: '{{ session_data.get("Incident_Description", "") | tojson | safe }}',
+                Incident_Type: '{{ session_data.get("Incident_Type", "") | tojson | safe }}',
+                Name: '{{ session_data.get("Name", "") | tojson | safe }}',
+                Phone_Number: '{{ session_data.get("Phone_Number", "") | tojson | safe }}',
+                Product: '{{ session_data.get("Product", "") | tojson | safe }}',
+                Ticket_Category: '{{ session_data.get("Ticket_Category", "") | tojson | safe }}',
+                Ticket_Type:'{{ session_data.get("Ticket_Type", "") | tojson | safe }}'
+            };
+
+            // Set Zendesk custom fields on page load
+            window.addEventListener('load', function() {
+                console.log('Page loaded, setting Zendesk custom fields');
+                window.zE('messenger:set', 'conversationFields', [
+                    {"id": "25399778903058", "value": ticketData.Application},
+                    {"id": "25399775222290", "value": ticketData.Created_Date},
+                    {"id": "25391550675474", "value": ticketData.Customer},
+                    {"id": "25399741678354", "value": ticketData.Email_id},
+                    {"id": "25399781094930", "value": ticketData.Incident_Description},
+                    {"id": "25399750945554", "value": ticketData.Incident_Type},
+                    {"id": "25391564681106", "value": ticketData.Name},
+                    {"id": "25391578097426", "value": ticketData.Phone_Number},
+                    {"id": "25379100976786", "value": ticketData.Product},
+                    {"id": "25399783396370", "value": ticketData.Ticket_Category},
+                    {"id": "25399770228626", "value": ticketData.Ticket_Type}
+                ]);
+                window.zE('messenger:set', 'user', {
+                    email: ticketData.Email_id,
+                    name: ticketData.Name || 'Anonymous'
+                });
+            });
+
+            function handleNoSatisfaction() {
+                const messagesDiv = document.querySelector('.messages');
+                const statusMsg = document.createElement('div');
+                statusMsg.className = 'bot-message';
+                statusMsg.innerHTML = `
+                    <div class="bot-avatar"></div>
+                    <div class="message-content">
+                        Connecting you with a live support agent. Please wait...
+                    </div>
+                `;
+                messagesDiv.appendChild(statusMsg);
+                messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                window.zE('messenger', 'open');
+            }
+        </script>
+    {% endif %}
+
+    <script>
+        function toggleSidebar() {
+            document.querySelector('.sidebar').classList.toggle('active');
+        }
+
+        const messages = document.querySelector('.messages');
+        messages.scrollTop = messages.scrollHeight;
+    </script>
+</body>
+</html>
